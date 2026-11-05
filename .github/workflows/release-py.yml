@@ -1,0 +1,56 @@
+name: Release Python SDK
+
+on:
+  push:
+    tags:
+      - "py-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Align package version with the tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#py-v}"
+          python - "$VERSION" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          pyproject = pathlib.Path("pyproject.toml")
+          text, count = re.subn(
+              r'(?m)^version = ".*"$',
+              f'version = "{version}"',
+              pyproject.read_text(),
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("version field not found in pyproject.toml")
+          pyproject.write_text(text)
+          models = pathlib.Path("src/nxtl_esim/models.py")
+          updated, count = re.subn(
+              r'(?m)^SDK_VERSION = ".*"$',
+              f'SDK_VERSION = "{version}"',
+              models.read_text(),
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("SDK_VERSION not found")
+          models.write_text(updated)
+          PY
+      - run: python -m pip install build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist

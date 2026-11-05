@@ -1,0 +1,1763 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "NXTL B2B API",
+    "version": "2.6.1",
+    "description": "Partner REST API. Authenticate every request with `X-NXTL-Key: <secret>` (the value returned once when the key is created). Send `Idempotency-Key` (or legacy `X-NXTL-Idempotency-Key`) on every POST that creates a resource \u2014 replays return the original outcome plus `Idempotent-Replayed: true`. Errors come back in a uniform envelope (`type`, `code`, `message`, `request_id`, `doc_url`). Webhook bodies are signed with HMAC-SHA256 \u2014 verify using the timestamped `X-NXTL-Signature-V1: t=<unix>,v1=<hex>` header.",
+    "contact": {
+      "name": "NXTL Support",
+      "url": "https://nxtlsim.com/for-business/",
+      "email": "support@nxtlsim.com"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://nxtlsim.com/api/v1",
+      "description": "Live"
+    }
+  ],
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Operations",
+      "description": "Health, quotas, audit log."
+    },
+    {
+      "name": "eSIMs",
+      "description": "Issue, list, mutate, suspend, resume, terminate."
+    },
+    {
+      "name": "Bulk",
+      "description": "Async batch operations + job introspection."
+    },
+    {
+      "name": "Balance",
+      "description": "Pooled balance, top-ups, ledger."
+    },
+    {
+      "name": "Usage",
+      "description": "Per-line aggregates, CDR-equivalent events, time series."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Subscriptions, delivery log, replay, signing secret."
+    },
+    {
+      "name": "Thresholds",
+      "description": "Alert rules for balance / usage."
+    },
+    {
+      "name": "API keys",
+      "description": "Self-service key lifecycle."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Public health check",
+        "security": [],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Health"
+          }
+        }
+      }
+    },
+    "/partner": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Partner profile + scopes resolved by the key",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Partner"
+          }
+        }
+      }
+    },
+    "/quotas": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Balance, lifetime quota, rate limit, issuance fee, subscription state",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Quotas"
+          }
+        }
+      }
+    },
+    "/audit": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Partner-scoped audit log",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Action prefix filter, e.g. `esim.` or `webhook.`."
+          },
+          {
+            "name": "target_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AuditPage"
+          }
+        }
+      }
+    },
+    "/esims": {
+      "get": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "List eSIMs in your fleet",
+        "parameters": [
+          {
+            "name": "iccid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pre_service",
+                "ready",
+                "suspended",
+                "terminated"
+              ]
+            }
+          },
+          {
+            "name": "tier",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "client_reference",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ESimsPage"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Issue a single eSIM (async)",
+        "description": "Returns 202 Accepted with a job id. Webhook `esim.provisioned` fires when the SIM is bound. Send `Idempotency-Key` to make retries safe.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ESimIssueRequest"
+              },
+              "example": {
+                "nickname": "Traveller 123",
+                "tier": "cheapest",
+                "client_reference": "ORDER-123"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/JobAccepted"
+          },
+          "402": {
+            "$ref": "#/components/responses/InsufficientBalance"
+          },
+          "409": {
+            "$ref": "#/components/responses/QuotaExceeded"
+          }
+        }
+      }
+    },
+    "/lines": {
+      "get": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Legacy alias of GET /esims",
+        "description": "Same fleet list as GET /esims. New integrations should call /esims.",
+        "parameters": [
+          {
+            "name": "iccid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pre_service",
+                "ready",
+                "suspended",
+                "terminated"
+              ]
+            }
+          },
+          {
+            "name": "tier",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "client_reference",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ESimsPage"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}": {
+      "get": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Retrieve one eSIM",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ESim"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/nickname": {
+      "patch": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Update nickname",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/NicknameBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ESim"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/tier": {
+      "patch": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Change network tier",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/TierBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ESim"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/status": {
+      "patch": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Suspend / reactivate / terminate",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/StatusBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          },
+          "409": {
+            "description": "Reactivate refused: eSIM is already terminated. Issue a new eSIM."
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/suspend": {
+      "post": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Suspend alias",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/resume": {
+      "post": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Reactivate alias",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/wallet": {
+      "get": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Wallet snapshot",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Wallet"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/usage": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Per-line usage rows",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UsageList"
+          }
+        }
+      }
+    },
+    "/esims/{iccid}/events": {
+      "get": {
+        "tags": [
+          "eSIMs"
+        ],
+        "summary": "Per-line ledger events",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Iccid"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EventList"
+          }
+        }
+      }
+    },
+    "/esims/bulk-status": {
+      "post": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "Look up the status of many ICCIDs in one call",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/IccidList"
+        },
+        "responses": {
+          "200": {
+            "description": "Array of `{iccid, status, tier, lifecycle}` rows."
+          }
+        }
+      }
+    },
+    "/esims/bulk-tier": {
+      "post": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "Change the network tier for many ICCIDs at once",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/BulkTier"
+        },
+        "responses": {
+          "200": {
+            "description": "All ICCIDs updated; per-ICCID `esim.tier_changed` webhooks fire."
+          }
+        }
+      }
+    },
+    "/esims/bulk-issue": {
+      "post": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "Async batch issuance",
+        "description": "Returns 202 + job id. Pre-flight balance + quota checks; on insufficient balance you get 402 with a full estimate breakdown.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/BulkIssue"
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/JobAccepted"
+          },
+          "402": {
+            "$ref": "#/components/responses/InsufficientBalance"
+          },
+          "409": {
+            "$ref": "#/components/responses/QuotaExceeded"
+          }
+        }
+      }
+    },
+    "/esims/estimate": {
+      "post": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "Pre-flight cost estimate",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Estimate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Estimate"
+          }
+        }
+      }
+    },
+    "/jobs": {
+      "get": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "List your async jobs",
+        "responses": {
+          "200": {
+            "description": "Paginated list of jobs (issuance, bulk-tier, \u2026) with status counts."
+          }
+        }
+      }
+    },
+    "/jobs/{id}": {
+      "get": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "Job detail with per-row results",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          }
+        }
+      }
+    },
+    "/esim-requests/{job_id}": {
+      "get": {
+        "tags": [
+          "Bulk"
+        ],
+        "summary": "Legacy alias for /jobs/{id} (kept for back-compat)",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          }
+        }
+      }
+    },
+    "/balance": {
+      "get": {
+        "tags": [
+          "Balance"
+        ],
+        "summary": "Pool totals + per-eSIM wallet mirrors",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Balance"
+          }
+        }
+      }
+    },
+    "/balance/history": {
+      "get": {
+        "tags": [
+          "Balance"
+        ],
+        "summary": "Recent ledger entries",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ledger entries."
+          }
+        }
+      }
+    },
+    "/topup": {
+      "post": {
+        "tags": [
+          "Balance"
+        ],
+        "summary": "Credit pool from prepaid budget",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Topup"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          },
+          "402": {
+            "$ref": "#/components/responses/InsufficientBalance"
+          }
+        },
+        "description": "Credits the pooled balance from the partner prepaid budget (budget_usd) by amount_usd. Does not charge a saved card or create an external payment. Returns 402 when the prepaid budget is smaller than the requested amount. Send Idempotency-Key so a retry returns the original credit."
+      }
+    },
+    "/invoices": {
+      "get": {
+        "tags": [
+          "Balance"
+        ],
+        "summary": "WooCommerce orders for API-driven top-ups",
+        "responses": {
+          "200": {
+            "description": "List of orders + invoice hints."
+          }
+        }
+      }
+    },
+    "/usage/summary": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Partner-wide aggregated usage",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 7
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Totals for `days`, MTD, today."
+          }
+        }
+      }
+    },
+    "/usage/esims": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Per-eSIM aggregates (top-N + filter)",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "iccid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ window, esims: [...] }"
+          }
+        }
+      }
+    },
+    "/usage/lines": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Legacy alias of /usage/esims",
+        "deprecated": true,
+        "responses": {
+          "200": {
+            "description": "Same response shape as /usage/esims."
+          }
+        }
+      }
+    },
+    "/usage/cdrs": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Itemised usage events (CDR-equivalent)",
+        "parameters": [
+          {
+            "name": "iccid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated CDR list."
+          }
+        }
+      }
+    },
+    "/usage/timeseries": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Daily usage + top-up totals (chart-ready)",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30,
+              "maximum": 365
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Series of `{day, usage_usd, topup_usd, events}`."
+          }
+        }
+      }
+    },
+    "/api-keys": {
+      "get": {
+        "tags": [
+          "API keys"
+        ],
+        "summary": "List keys (no secrets)",
+        "responses": {
+          "200": {
+            "description": "List."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "API keys"
+        ],
+        "summary": "Create key (returns secret once)",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ApiKeyCreate"
+        },
+        "responses": {
+          "201": {
+            "description": "{ public_id, secret, scopes, warning }"
+          }
+        }
+      }
+    },
+    "/api-keys/{key_public}": {
+      "delete": {
+        "tags": [
+          "API keys"
+        ],
+        "summary": "Revoke key",
+        "parameters": [
+          {
+            "name": "key_public",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/webhooks": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Read URL + subscriptions",
+        "responses": {
+          "200": {
+            "description": "Configured webhook URL and event list."
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Update URL + subscriptions",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/WebhookConfig"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/webhooks/events": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Catalog of every event we emit + subscription state",
+        "responses": {
+          "200": {
+            "description": "{ events: [{event, description, subscribed}] }"
+          }
+        }
+      }
+    },
+    "/webhooks/secret": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Active HMAC secret + signed-payload spec",
+        "responses": {
+          "200": {
+            "description": "{ algorithm, header_v1, signed_payload, active_secret, rotating_secret }"
+          }
+        }
+      }
+    },
+    "/webhooks/test": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Send `test.ping` to configured URL",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/webhooks/deliveries": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List webhook deliveries",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "delivered",
+                "failed"
+              ]
+            }
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated deliveries."
+          }
+        }
+      }
+    },
+    "/webhooks/deliveries/{id}": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Full delivery row (payload + response)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery detail."
+          }
+        }
+      }
+    },
+    "/webhooks/deliveries/{id}/replay": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Replay a delivery to your endpoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/webhooks/{id}/replay": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Replay a delivery (legacy alias)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    },
+    "/thresholds": {
+      "get": {
+        "tags": [
+          "Thresholds"
+        ],
+        "summary": "List rules",
+        "responses": {
+          "200": {
+            "description": "{ rules: [...] }"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Thresholds"
+        ],
+        "summary": "Create rule",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ThresholdRule"
+        },
+        "responses": {
+          "201": {
+            "description": "{ id }"
+          }
+        }
+      }
+    },
+    "/thresholds/{id}": {
+      "patch": {
+        "tags": [
+          "Thresholds"
+        ],
+        "summary": "Update rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ThresholdRule"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Thresholds"
+        ],
+        "summary": "Delete rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ack"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-NXTL-Key"
+      }
+    },
+    "parameters": {
+      "Iccid": {
+        "name": "iccid",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 18,
+          "maxLength": 22
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "description": "Unique key per logical operation; safe retries return the original outcome plus `Idempotent-Replayed: true`. Legacy header `X-NXTL-Idempotency-Key` is also accepted."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error",
+          "type",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "type": {
+            "type": "string",
+            "example": "INSUFFICIENT_BALANCE"
+          },
+          "code": {
+            "type": "string",
+            "example": "insufficient_balance"
+          },
+          "message": {
+            "type": "string"
+          },
+          "doc_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "ESim": {
+        "type": "object",
+        "properties": {
+          "iccid": {
+            "type": "string"
+          },
+          "nickname": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "client_reference": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "wallet": {
+            "type": "object",
+            "properties": {
+              "balance_usd": {
+                "type": "number"
+              },
+              "currency": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "ESimIssueRequest": {
+        "type": "object",
+        "properties": {
+          "nickname": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string",
+            "description": "Accepted values are cheapest and best_coverage. The alias standard is accepted and stored as cheapest. When omitted, issuance uses cheapest.",
+            "enum": [
+              "cheapest",
+              "best_coverage"
+            ],
+            "default": "cheapest"
+          },
+          "client_reference": {
+            "type": "string"
+          }
+        }
+      },
+      "BulkIssueRequest": {
+        "type": "object",
+        "required": [
+          "quantity"
+        ],
+        "properties": {
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "tier": {
+            "type": "string",
+            "default": "cheapest",
+            "description": "Accepted values are cheapest and best_coverage. The alias standard is accepted and stored as cheapest. When omitted, issuance uses cheapest.",
+            "enum": [
+              "cheapest",
+              "best_coverage"
+            ]
+          },
+          "client_reference": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "EstimateRequest": {
+        "type": "object",
+        "required": [
+          "quantity"
+        ],
+        "properties": {
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "tier": {
+            "type": "string",
+            "default": "cheapest",
+            "description": "Accepted values are cheapest and best_coverage. The alias standard is accepted and stored as cheapest. When omitted, issuance uses cheapest.",
+            "enum": [
+              "cheapest",
+              "best_coverage"
+            ]
+          }
+        }
+      },
+      "ThresholdRule": {
+        "type": "object",
+        "required": [
+          "metric",
+          "threshold_value"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "balance",
+              "esim",
+              "line"
+            ]
+          },
+          "metric": {
+            "type": "string",
+            "enum": [
+              "balance_below",
+              "line_usage_pct",
+              "line_usage_usd_today"
+            ]
+          },
+          "operator": {
+            "type": "string",
+            "enum": [
+              "<",
+              "<=",
+              "=",
+              ">=",
+              ">"
+            ]
+          },
+          "threshold_value": {
+            "type": "number"
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "instant",
+              "daily",
+              "weekly",
+              "monthly"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "notify",
+              "suspend"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "notes": {
+            "type": "object",
+            "properties": {
+              "cap_per_line_usd": {
+                "type": "number"
+              },
+              "min_renotify_seconds": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "WebhookEnvelope": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "timestamp",
+          "data"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "evt_5f8b2e0d\u2026"
+          },
+          "event": {
+            "type": "string",
+            "example": "esim.provisioned"
+          },
+          "timestamp": {
+            "type": "integer",
+            "description": "Unix seconds UTC"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "requestBodies": {
+      "NicknameBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "nickname"
+              ],
+              "properties": {
+                "nickname": {
+                  "type": "string",
+                  "maxLength": 80
+                }
+              }
+            }
+          }
+        }
+      },
+      "TierBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "tier"
+              ],
+              "properties": {
+                "tier": {
+                  "type": "string",
+                  "enum": [
+                    "cheapest",
+                    "best_coverage"
+                  ],
+                  "description": "cheapest or best_coverage. standard is accepted as an alias of cheapest."
+                }
+              }
+            }
+          }
+        }
+      },
+      "StatusBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "action"
+              ],
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "suspend",
+                    "reactivate",
+                    "terminate"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "Topup": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "amount_usd"
+              ],
+              "properties": {
+                "amount_usd": {
+                  "type": "number",
+                  "minimum": 0.01,
+                  "description": "USD amount credited to the pooled balance from the partner prepaid budget. Minimum 0.01. This does not charge a saved payment method."
+                }
+              }
+            },
+            "example": {
+              "amount_usd": 25
+            }
+          }
+        }
+      },
+      "IccidList": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "iccids"
+              ],
+              "properties": {
+                "iccids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "BulkTier": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "iccids",
+                "tier"
+              ],
+              "properties": {
+                "iccids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 1000
+                },
+                "tier": {
+                  "type": "string",
+                  "enum": [
+                    "cheapest",
+                    "best_coverage"
+                  ],
+                  "description": "cheapest or best_coverage."
+                }
+              }
+            }
+          }
+        }
+      },
+      "BulkIssue": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BulkIssueRequest"
+            },
+            "example": {
+              "quantity": 1,
+              "tier": "cheapest"
+            }
+          }
+        }
+      },
+      "Estimate": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/EstimateRequest"
+            },
+            "example": {
+              "quantity": 1,
+              "tier": "cheapest"
+            }
+          }
+        }
+      },
+      "ApiKeyCreate": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "WebhookConfig": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "webhook_url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ThresholdRule": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ThresholdRule"
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Health": {
+        "description": "Plugin reachable."
+      },
+      "Partner": {
+        "description": "Partner profile + scopes."
+      },
+      "Quotas": {
+        "description": "Balance/quota/rate-limit/issuance fee snapshot."
+      },
+      "AuditPage": {
+        "description": "Paginated partner audit rows."
+      },
+      "ESimsPage": {
+        "description": "Paginated list of eSIMs."
+      },
+      "ESim": {
+        "description": "Single eSIM resource.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ESim"
+            }
+          }
+        }
+      },
+      "Wallet": {
+        "description": "Wallet snapshot."
+      },
+      "UsageList": {
+        "description": "Per-line usage rows."
+      },
+      "EventList": {
+        "description": "Per-line ledger events."
+      },
+      "Balance": {
+        "description": "Pool totals + per-eSIM wallets."
+      },
+      "Estimate": {
+        "description": "Pre-flight cost estimate."
+      },
+      "Job": {
+        "description": "Job detail with per-row results."
+      },
+      "JobAccepted": {
+        "description": "202 Accepted with job_id."
+      },
+      "Ack": {
+        "description": "Generic acknowledgement."
+      },
+      "InsufficientBalance": {
+        "description": "402 Insufficient pooled balance.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "QuotaExceeded": {
+        "description": "409 Lifetime issuance quota exhausted.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}
