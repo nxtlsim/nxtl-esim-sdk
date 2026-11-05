@@ -1,6 +1,17 @@
 export { formatData, fromBytes, toBytes } from "./units.js";
 export type { DataUnit, NormalizedVolume } from "./units.js";
 
+export {
+  THRESHOLD_EVALUATION_NOTE,
+  USAGE_POLL_INTERVAL_SECONDS,
+  SUPPLIER_LAG_LOOKBACK_SECONDS,
+  apiCharge,
+  parseRollupNumber,
+  parseUtcTimestamp,
+  webhookCharge,
+} from "./ledger.js";
+export type { ApiCharge, ChargeKind } from "./ledger.js";
+
 export { convertFx, formatMoneyWithFx, rateOf } from "./fx.js";
 export type { FxTable } from "./fx.js";
 

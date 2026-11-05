@@ -11,7 +11,9 @@ export { API_OPERATIONS, operationById } from "./operations.js";
 export {
   NxtlAccessDeniedError,
   NxtlAuthError,
+  NxtlAlreadyTerminatedError,
   NxtlConflictError,
+  NxtlResumeBlockedError,
   NxtlConnectionError,
   NxtlError,
   NxtlInsufficientBalanceError,

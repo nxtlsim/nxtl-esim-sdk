@@ -2,7 +2,7 @@
 
 TypeScript SDK for the [NXTL eSIM](https://nxtlsim.com) B2B API. Issue and manage pay-as-you-go travel eSIMs, read the pooled balance, and verify signed webhooks.
 
-Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.1** (48 operations) at `https://nxtlsim.com/api/v1`.
+Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.2** (48 operations) at `https://nxtlsim.com/api/v1`.
 
 ```bash
 npm install @nxtlsim/esim-sdk
@@ -231,7 +231,9 @@ Everything in this section is bookkeeping in your process. [NXTL eSIM](https://n
 
 `loadUsageDetails` calls `GET /usage/cdrs` (and `GET /esims/{iccid}/usage` for one line). With `includePartnerRollups` it also calls `GET /usage/summary`, `GET /usage/esims`, and `GET /usage/timeseries`. Periods are `daily`, `monthly`, or a custom `range`.
 
-Wholesale cost uses `amount_usd` / `amount_eur` when the row has them. A zero in the converted currency is not treated as free. If those fields are missing and the row has bytes plus a country, the public pricing feed supplies EUR per GB. Retail applies your markup. Margin is retail minus wholesale. `byLine`, `byDay`, `byMonth`, and `byCountry` group the same rows. The per-country list stays empty when no row carries a country field, which the OpenAPI schema does not define.
+Reconciled cost uses the native ledger field selected by `currency`. For current usage that is EUR: `amount_eur` is a signed retail pool debit (for example `-0.42`) and `amount_usd` is `0`. That zero is not an FX conversion and is not free usage. The positive value is the NXTL API charge, the reseller's acquisition cost. It is not NXTL's upstream wholesale cost. Markup and margin sit on top of that charge. The public per-GB feed is only for separate trip quotes, never a fallback for reconciled charges.
+
+`GET /usage/cdrs` returns `{ cdrs, total, page, pages }`. Its `bytes` and country text are placeholders on the current serializer and are not used for country reports or package allowances. `GET /esims/{iccid}/usage` returns `{ iccid, provider, page, usage }` with a fixed page size of 50. Only `entry_type: "usage"` contributes octets and a country name such as `Germany`. `mb` is `bytes / 1048576`. `GET /usage/esims` and `GET /usage/lines` return `{ window, lines }`. `usage_usd`, `usage_eur`, and `usage_events` are JSON strings; `parseRollupNumber` converts them. Money and volume stay in separate streams so a CDR charge and a per-line volume row are not billed twice. CDR ledger ids and webhook event ids are not joined. Sync dedup keys are stored with the wallet write. Missing volume is not reported as a measured zero.
 
 `snapshotUsage` plus `diffSnapshots` turns two polls into the rows and money added since the previous snapshot. `toBytes` / `formatData` normalise B, KB, MB, GB, and TB on a 1000-based scale.
 

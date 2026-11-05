@@ -50,7 +50,7 @@
   "scripts": {
     "build": "tsup",
     "lint": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "prepublishOnly": "npm run lint && npm test && npm run build"
   },
   "devDependencies": {

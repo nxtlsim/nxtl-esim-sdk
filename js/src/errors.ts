@@ -72,6 +72,12 @@ export class NxtlInsufficientBalanceError extends NxtlError {}
 /** HTTP 409. */
 export class NxtlConflictError extends NxtlError {}
 
+/** HTTP 409 `already_terminated`. Reactivate cannot undo terminate. */
+export class NxtlAlreadyTerminatedError extends NxtlConflictError {}
+
+/** HTTP 402 `resume_blocked`. A usage guard blocked reactivate. */
+export class NxtlResumeBlockedError extends NxtlError {}
+
 /** HTTP 409 when the code is `quota_exhausted` (lifetime issuance quota). */
 export class NxtlQuotaExceededError extends NxtlConflictError {}
 
@@ -173,11 +179,15 @@ export function createApiError(
   if (status === 401) return new NxtlAuthError(message, options);
   if (status === 403) return new NxtlAccessDeniedError(message, options);
   if (status === 404) return new NxtlNotFoundError(message, options);
-  if (status === 402) return new NxtlInsufficientBalanceError(message, options);
+  if (status === 402) {
+    if (code === "resume_blocked") return new NxtlResumeBlockedError(message, options);
+    return new NxtlInsufficientBalanceError(message, options);
+  }
   if (status === 409) {
     if (code === "quota_exhausted" || code === "quota_exceeded") {
       return new NxtlQuotaExceededError(message, options);
     }
+    if (code === "already_terminated") return new NxtlAlreadyTerminatedError(message, options);
     return new NxtlConflictError(message, options);
   }
   if (status === 429) return new NxtlRateLimitError(message, options);

@@ -78,6 +78,14 @@ class NxtlConflictError(NxtlError):
     """HTTP 409."""
 
 
+class NxtlAlreadyTerminatedError(NxtlConflictError):
+    """HTTP 409 already_terminated. Reactivate cannot undo terminate."""
+
+
+class NxtlResumeBlockedError(NxtlError):
+    """HTTP 402 resume_blocked. A usage guard blocked reactivate."""
+
+
 class NxtlQuotaExceededError(NxtlConflictError):
     """HTTP 409 when the code is quota_exhausted."""
 
@@ -148,10 +156,14 @@ def create_api_error(status_code: int, body: Any, headers: Mapping[str, str], re
     if status_code == 404:
         return NxtlNotFoundError(message, **kwargs)
     if status_code == 402:
+        if code == "resume_blocked":
+            return NxtlResumeBlockedError(message, **kwargs)
         return NxtlInsufficientBalanceError(message, **kwargs)
     if status_code == 409:
         if code in {"quota_exhausted", "quota_exceeded"}:
             return NxtlQuotaExceededError(message, **kwargs)
+        if code == "already_terminated":
+            return NxtlAlreadyTerminatedError(message, **kwargs)
         return NxtlConflictError(message, **kwargs)
     if status_code == 429:
         return NxtlRateLimitError(message, **kwargs)

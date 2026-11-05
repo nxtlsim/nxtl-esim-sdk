@@ -27,6 +27,8 @@ export interface LineAssignment {
   label?: string;
   assignedAt: string;
   unassignedAt?: string;
+  /** Set when the reseller suspends the customer. Renewal will not resume these lines. */
+  manualPause?: boolean;
 }
 
 export type LedgerKind = "credit" | "debit" | "adjustment";
@@ -61,8 +63,14 @@ export interface SellablePackage {
   overage: "flag" | "suspend";
   /** Lower numbers are consumed first when allocation mode is `priority`. */
   priority: number;
-  /** Optional USD figure copied into a NXTL threshold rule. Not a data cap. */
+  /**
+   * Optional USD figure for line_usage_pct / line_usage_usd_today.
+   * Current EUR usage has amount_usd 0, so this rule does not observe that charge.
+   * The stored period does not select the evaluation window.
+   */
   usdCap?: number;
+  /** When true, renewal may resume the line. A manual reseller pause is left suspended. */
+  resumeOnRenewal?: boolean;
 }
 
 export type AllocationStatus = "active" | "expired" | "exhausted" | "overage";
@@ -105,6 +113,16 @@ export interface AssignmentFilter {
   activeOnly?: boolean;
 }
 
+export interface AppliedKey {
+  stream: "cdr" | "line_usage" | "webhook";
+  key: string;
+}
+
+export interface SyncCommit {
+  wallet?: WalletEntry[];
+  applied?: AppliedKey[];
+}
+
 export interface CustomerStore {
   putCustomer(customer: Customer): Promise<void>;
   getCustomer(id: string): Promise<Customer | undefined>;
@@ -122,6 +140,9 @@ export interface CustomerStore {
   listSnapshots(filter?: { customerId?: string; iccid?: string }): Promise<UsageSnapshot[]>;
   putInvoice(invoice: StoredInvoice): Promise<void>;
   listInvoices(filter?: { customerId?: string }): Promise<StoredInvoice[]>;
+  hasApplied(stream: AppliedKey["stream"], key: string): Promise<boolean>;
+  /** Writes wallet rows and dedup keys together. JSON file store persists once. */
+  commitSync(commit: SyncCommit): Promise<void>;
 }
 
 interface MemoryDb {
@@ -132,6 +153,7 @@ interface MemoryDb {
   allocations: PackageAllocation[];
   snapshots: UsageSnapshot[];
   invoices: StoredInvoice[];
+  applied: AppliedKey[];
 }
 
 export class MemoryCustomerStore implements CustomerStore {
@@ -143,6 +165,7 @@ export class MemoryCustomerStore implements CustomerStore {
     allocations: [],
     snapshots: [],
     invoices: [],
+    applied: [],
   };
 
   async putCustomer(customer: Customer): Promise<void> {
@@ -228,6 +251,23 @@ export class MemoryCustomerStore implements CustomerStore {
   async listInvoices(filter: { customerId?: string } = {}): Promise<StoredInvoice[]> {
     return this.db.invoices.filter((item) => !filter.customerId || item.customerId === filter.customerId);
   }
+
+  async listApplied(): Promise<AppliedKey[]> {
+    return [...this.db.applied];
+  }
+
+  async hasApplied(stream: AppliedKey["stream"], key: string): Promise<boolean> {
+    return this.db.applied.some((item) => item.stream === stream && item.key === key);
+  }
+
+  async commitSync(commit: SyncCommit): Promise<void> {
+    for (const entry of commit.wallet ?? []) this.db.wallet.push(entry);
+    for (const key of commit.applied ?? []) {
+      if (!this.db.applied.some((item) => item.stream === key.stream && item.key === key.key)) {
+        this.db.applied.push(key);
+      }
+    }
+  }
 }
 
 /** Example adapter. One JSON document on disk. Not safe across processes. */
@@ -267,6 +307,7 @@ export class JsonFileCustomerStore extends MemoryCustomerStore {
       allocations: await this.listAllocations(),
       snapshots: await this.listSnapshots(),
       invoices: await this.listInvoices(),
+      applied: await super.listApplied(),
     };
   }
 
@@ -278,6 +319,7 @@ export class JsonFileCustomerStore extends MemoryCustomerStore {
     for (const item of data.allocations ?? []) await super.putAllocation(item);
     for (const item of data.snapshots ?? []) await super.putSnapshot(item);
     for (const item of data.invoices ?? []) await super.putInvoice(item);
+    for (const item of data.applied ?? []) await super.commitSync({ applied: [item] });
   }
 
   override async putCustomer(customer: Customer): Promise<void> {
@@ -367,6 +409,17 @@ export class JsonFileCustomerStore extends MemoryCustomerStore {
     await this.load();
     return super.listInvoices(filter);
   }
+
+  override async hasApplied(stream: AppliedKey["stream"], key: string): Promise<boolean> {
+    await this.load();
+    return super.hasApplied(stream, key);
+  }
+
+  override async commitSync(commit: SyncCommit): Promise<void> {
+    await this.load();
+    await super.commitSync(commit);
+    await this.persist();
+  }
 }
 
 interface MemoryShape {
@@ -377,6 +430,7 @@ interface MemoryShape {
   allocations: PackageAllocation[];
   snapshots: UsageSnapshot[];
   invoices: StoredInvoice[];
+  applied: AppliedKey[];
 }
 
 /**
@@ -432,6 +486,11 @@ CREATE TABLE nxtl_reseller_invoices (
   id TEXT PRIMARY KEY,
   customer_id TEXT NOT NULL,
   document_json TEXT NOT NULL
+);
+CREATE TABLE nxtl_reseller_applied (
+  stream TEXT NOT NULL,
+  dedup_key TEXT NOT NULL,
+  PRIMARY KEY (stream, dedup_key)
 );
 `.trim();
 
@@ -578,6 +637,21 @@ export class SqlCustomerStore implements CustomerStore {
   async listInvoices(filter: { customerId?: string } = {}): Promise<StoredInvoice[]> {
     const rows = await this.query("SELECT document_json FROM nxtl_reseller_invoices", []);
     return rows.map((row) => JSON.parse(String(row.document_json)) as StoredInvoice).filter((item) => !filter.customerId || item.customerId === filter.customerId);
+  }
+
+  async hasApplied(stream: AppliedKey["stream"], key: string): Promise<boolean> {
+    const rows = await this.query("SELECT dedup_key FROM nxtl_reseller_applied WHERE stream = ? AND dedup_key = ?", [stream, key]);
+    return rows.length > 0;
+  }
+
+  async commitSync(commit: SyncCommit): Promise<void> {
+    for (const entry of commit.wallet ?? []) await this.putWalletEntry(entry);
+    for (const item of commit.applied ?? []) {
+      await this.query(
+        "INSERT INTO nxtl_reseller_applied (stream, dedup_key) VALUES (?, ?) ON CONFLICT(stream, dedup_key) DO NOTHING",
+        [item.stream, item.key],
+      );
+    }
   }
 }
 

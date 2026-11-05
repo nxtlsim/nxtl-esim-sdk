@@ -7,11 +7,12 @@
  */
 
 import type { NxtlClient } from "../client.js";
-import type { PricingFeed } from "../catalog.js";
 import { quotePrice, type MarkupConfig } from "../pricing.js";
 import type { JsonObject } from "../types.js";
-import { fromBytes } from "./units.js";
 import { convertFx, type FxTable } from "./fx.js";
+import { apiCharge, parseUtcTimestamp, webhookCharge } from "./ledger.js";
+
+export type UsageSource = "cdr" | "line_usage" | "webhook" | "manual";
 
 export type UsagePeriod =
   | { kind: "daily"; day: string }
@@ -19,19 +20,26 @@ export type UsagePeriod =
   | { kind: "range"; since: string; until: string };
 
 export interface NormalizedUsageRow {
+  source: UsageSource;
+  /** CDR ledger id. Not comparable to a webhook event id. */
+  ledgerId?: number;
+  eventId?: string;
+  entryType?: string;
   iccid?: string;
   at?: string;
   amountUsd?: number;
   amountEur?: number;
   currency?: string;
-  /** Present only when the row carries a byte-denominated field. */
-  bytes?: number;
+  consumptionCharge?: number;
+  chargeKind?: string;
   /**
-   * Present only when the row carries a country field.
-   * TODO(spec): CDR and usage schemas do not name a country.
+   * Trusted octets. CDR bytes are placeholders and are omitted.
+   * Webhook bytes of 0 are omitted (legacy path with no volume).
    */
+  bytes?: number;
+  volumeTrusted: boolean;
+  /** Country name when the source actually sent one. Not inferred from operator or network. */
   country?: string;
-  /** `network` is mentioned for the usage.recorded webhook, not for CDR rows. */
   network?: string;
   sourceKeys: string[];
   raw: JsonObject;
@@ -41,7 +49,9 @@ export interface UsageCostTotals {
   rows: number;
   bytes: number;
   rowsWithVolume: number;
+  /** Sum of EUR consumption charges. This is the NXTL API charge, not upstream wholesale. */
   wholesaleUsd: number;
+  /** @see wholesaleUsd */
   wholesaleEur: number;
   pricedFromApi: number;
   pricedFromFeed: number;
@@ -71,10 +81,8 @@ export interface UsageCostReport {
   countryBreakdownAvailable: boolean;
   partnerSummary?: JsonObject;
   timeseries?: JsonObject;
-  /**
-   * TODO(spec): GET /esims/{iccid}/usage has no since/until parameters.
-   * Rows from that call are filtered locally when they have a timestamp.
-   */
+  /** False when a per-line page walk failed. Do not treat missing volume as measured zero. */
+  volumeComplete: boolean;
   notes: string[];
 }
 
@@ -123,25 +131,52 @@ export function periodBounds(period: UsagePeriod): { since: string; until: strin
   return { since: period.since, until: period.until };
 }
 
-export function normalizeUsageRow(raw: JsonObject): NormalizedUsageRow {
-  const sourceKeys: string[] = [];
+export function normalizeUsageRow(raw: JsonObject, source: UsageSource = "manual"): NormalizedUsageRow {
+  const sourceKeys: string[] = [source];
   const iccid = readString(raw, ["iccid"], sourceKeys);
-  const at = readTime(raw, sourceKeys);
-  const amountUsd = readNumber(raw, ["amount_usd", "usage_usd", "cost_usd"], sourceKeys);
-  const amountEur = readNumber(raw, ["amount_eur", "usage_eur", "cost_eur"], sourceKeys);
+  const atRaw = readString(raw, TIME_KEYS, sourceKeys);
+  const at = atRaw ? parseUtcTimestamp(atRaw) : undefined;
+  const amountUsd = readNumber(raw, ["amount_usd"], sourceKeys);
+  const amountEur = readNumber(raw, ["amount_eur"], sourceKeys);
   const currency = readString(raw, ["currency"], sourceKeys);
-  const bytes = readBytes(raw, sourceKeys);
-  const country = readCountry(raw, sourceKeys);
-  const network = readString(raw, ["network", "operator"], sourceKeys);
-  const row: NormalizedUsageRow = { sourceKeys, raw };
+  const entryType = readString(raw, ["entry_type"], sourceKeys);
+  const money = source === "webhook"
+    ? webhookCharge({ currency, amount: readNumber(raw, ["amount"], sourceKeys) })
+    : apiCharge({ currency, amount_usd: amountUsd, amount_eur: amountEur });
+  const row: NormalizedUsageRow = {
+    source,
+    sourceKeys,
+    raw,
+    volumeTrusted: false,
+    chargeKind: money.kind,
+    consumptionCharge: money.consumptionCharge,
+  };
+  if (typeof raw.id === "number" && source === "cdr") row.ledgerId = raw.id;
+  if (typeof raw.id === "string" && source === "webhook") row.eventId = raw.id;
+  if (entryType) row.entryType = entryType;
   if (iccid) row.iccid = iccid;
   if (at) row.at = at;
   if (amountUsd !== undefined) row.amountUsd = amountUsd;
   if (amountEur !== undefined) row.amountEur = amountEur;
   if (currency) row.currency = currency;
-  if (bytes !== undefined) row.bytes = bytes;
-  if (country) row.country = country;
-  if (network) row.network = network;
+  if (money.currency) row.currency = money.currency || row.currency;
+  const trustVolume = source === "manual" || (source === "line_usage" && entryType === "usage") || (source === "webhook" && (readNumber(raw, ["bytes"], sourceKeys) ?? 0) > 0);
+  if (trustVolume) {
+    const bytes = source === "line_usage" || source === "webhook"
+      ? readNumber(raw, ["bytes"], sourceKeys)
+      : readBytes(raw, sourceKeys);
+    if (bytes !== undefined && !(source === "webhook" && bytes === 0)) {
+      row.bytes = bytes;
+      row.volumeTrusted = true;
+    }
+    const country = readString(raw, source === "manual" ? ["country", "iso2"] : ["country"], sourceKeys);
+    if (country && country.trim()) {
+      const trimmed = country.trim();
+      row.country = source === "manual" && /^[a-z]{2}$/i.test(trimmed) ? trimmed.toUpperCase() : trimmed;
+    }
+  }
+  const network = readString(raw, ["network", "operator"], sourceKeys);
+  if (network && source !== "cdr") row.network = network;
   return row;
 }
 
@@ -156,7 +191,6 @@ export function rowInPeriod(row: NormalizedUsageRow, since: string, until: strin
 
 export interface CostOptions {
   markup?: MarkupConfig;
-  pricing?: PricingFeed;
   fx?: FxTable;
   /** Currency used for retail and margin. Defaults to markup.currency or EUR. */
   retailCurrency?: string;
@@ -179,20 +213,20 @@ export function costUsage(rows: readonly NormalizedUsageRow[], options: CostOpti
     zeroIsNotFree: false,
   };
   for (const row of rows) {
-    if (row.bytes !== undefined) {
+    if (row.volumeTrusted && row.bytes !== undefined) {
       totals.bytes += row.bytes;
       totals.rowsWithVolume += 1;
     }
-    const priced = priceRow(row, options, retailCurrency);
-    if ((row.amountUsd === 0 && row.amountEur !== undefined && row.amountEur !== 0) || (row.amountEur === 0 && row.amountUsd !== undefined && row.amountUsd !== 0)) {
+    if (row.currency === "EUR" && row.amountUsd === 0 && (row.consumptionCharge ?? 0) > 0) {
       totals.zeroIsNotFree = true;
     }
+    if (row.source === "line_usage") continue;
+    const priced = priceRow(row, options, retailCurrency);
     if (!priced) {
-      totals.unpricedRows += 1;
+      if ((row.consumptionCharge ?? 0) > 0) totals.unpricedRows += 1;
       continue;
     }
-    if (priced.source === "api") totals.pricedFromApi += 1;
-    else totals.pricedFromFeed += 1;
+    totals.pricedFromApi += 1;
     if (priced.native === "USD") totals.wholesaleUsd += priced.nativeAmount;
     if (priced.native === "EUR") totals.wholesaleEur += priced.nativeAmount;
     totals.retail += priced.retail;
@@ -212,13 +246,14 @@ export function buildUsageReport(
   if (filtered.some((row) => !row.at)) {
     notes.push("Some usage rows had no timestamp and were kept inside the requested period.");
   }
-  if (filtered.some((row) => row.bytes === undefined)) {
-    notes.push("TODO(spec): usage rows do not publish a byte field. Volume is set only when a byte, MB, or GB key is present.");
+  const countryRows = filtered.filter((row) => row.volumeTrusted && row.country);
+  if (filtered.some((row) => row.source === "cdr")) {
+    notes.push("GET /usage/cdrs bytes and country are placeholders on the current serializer and are excluded from volume and country reports.");
   }
-  const countryRows = filtered.filter((row) => row.country);
   if (countryRows.length === 0) {
-    notes.push("TODO(spec): the usage and CDR schemas do not name a country, so the per-country breakdown is empty unless a row already includes one.");
+    notes.push("No trusted country was present. Country is not inferred from operator or network text.");
   }
+  notes.push("Amounts labelled wholesale in totals are NXTL API charges (reseller acquisition cost), not upstream wholesale.");
   return {
     period,
     since: bounds.since,
@@ -230,6 +265,7 @@ export function buildUsageReport(
     byDay: groupCost(filtered.filter((row) => row.at), (row) => (row.at ?? "").slice(0, 10), options),
     byMonth: groupCost(filtered.filter((row) => row.at), (row) => (row.at ?? "").slice(0, 7), options),
     countryBreakdownAvailable: countryRows.length > 0,
+    volumeComplete: true,
     notes,
   };
 }
@@ -252,19 +288,26 @@ export async function loadUsageDetails(
   };
   if (input.iccid) query.iccid = input.iccid;
   for await (const row of client.iterateUsageCdrs(query)) {
-    cdrs.push(normalizeUsageRow(row));
+    cdrs.push(normalizeUsageRow(row, "cdr"));
   }
   let lineRows: NormalizedUsageRow[] = [];
+  let volumeComplete = true;
   if (input.iccid) {
-    const line = await client.getEsimUsage(input.iccid);
-    lineRows = extractRawRows(line.data).map(normalizeUsageRow);
-    notes.push("GET /esims/{iccid}/usage has no time filters in the spec. Rows with a timestamp are filtered to the period locally.");
+    try {
+      for await (const row of client.iterateEsimUsage(input.iccid)) {
+        lineRows.push(normalizeUsageRow(row, "line_usage"));
+      }
+    } catch (error) {
+      volumeComplete = false;
+      notes.push(error instanceof Error ? error.message : "Per-line usage page walk failed");
+    }
+    notes.push("GET /esims/{iccid}/usage has no since/until parameter. Page size is 50. Only entry_type usage supplies bytes and country. CDR placeholders are kept as a separate charge stream and are not used as volume.");
+  } else {
+    volumeComplete = false;
+    notes.push("No ICCID was requested, so per-line volume was not collected. CDR bytes are not measured consumption.");
   }
-  const rows = cdrs.length > 0 ? cdrs : lineRows;
-  if (cdrs.length === 0 && lineRows.length > 0) {
-    notes.push("CDR list was empty. Per-line usage rows were used instead.");
-  }
-  const report = buildUsageReport(rows, input.period, input);
+  const report = buildUsageReport([...cdrs, ...lineRows], input.period, input);
+  report.volumeComplete = volumeComplete && input.iccid !== undefined;
   report.notes.push(...notes);
   if (input.includePartnerRollups) {
     const days = Math.min(365, Math.max(1, Math.ceil((Date.parse(bounds.until) - Date.parse(bounds.since)) / 86_400_000)));
@@ -325,36 +368,18 @@ function priceRow(
   row: NormalizedUsageRow,
   options: CostOptions,
   retailCurrency: string,
-): { source: "api" | "feed"; native: "USD" | "EUR"; nativeAmount: number; wholesaleInRetail: number; retail: number } | undefined {
-  let native: "USD" | "EUR" | undefined;
-  let nativeAmount: number | undefined;
-  let source: "api" | "feed" = "api";
-  if (row.amountUsd !== undefined && !(row.amountUsd === 0 && row.amountEur)) {
-    native = "USD";
-    nativeAmount = row.amountUsd;
-  } else if (row.amountEur !== undefined) {
-    native = "EUR";
-    nativeAmount = row.amountEur;
-  } else if (row.bytes !== undefined && row.country && options.pricing) {
-    const country = options.pricing.countries.find((item) => item.iso2.toUpperCase() === row.country?.toUpperCase());
-    if (country) {
-      native = "EUR";
-      nativeAmount = fromBytes(row.bytes).gb * country.cheapest_eur_per_gb;
-      source = "feed";
-    }
-  }
-  if (native === undefined || nativeAmount === undefined) return undefined;
-  const wholesaleInRetail = options.fx && native !== retailCurrency.toUpperCase()
-    ? convertFx(nativeAmount, native, retailCurrency, options.fx)
-    : native === retailCurrency.toUpperCase() || !options.fx
-      ? nativeAmount
-      : nativeAmount;
-  if (!options.fx && native !== retailCurrency.toUpperCase()) {
-    return undefined;
-  }
+): { native: "USD" | "EUR"; nativeAmount: number; wholesaleInRetail: number; retail: number } | undefined {
+  if (row.chargeKind !== "debit" || !row.consumptionCharge || !row.currency) return undefined;
+  if (row.currency !== "EUR" && row.currency !== "USD") return undefined;
+  const native = row.currency;
+  const nativeAmount = row.consumptionCharge;
+  if (native !== retailCurrency.toUpperCase() && !options.fx) return undefined;
+  const wholesaleInRetail = native === retailCurrency.toUpperCase() || !options.fx
+    ? nativeAmount
+    : convertFx(nativeAmount, native, retailCurrency, options.fx);
   const markup = options.markup ?? { mode: "percentage", percentage: 0, rounding: "nearest", currency: retailCurrency };
-  const quote = quotePrice(wholesaleInRetail, { ...markup, currency: retailCurrency }, { country: row.country });
-  return { source, native, nativeAmount, wholesaleInRetail, retail: quote.retail };
+  const quote = quotePrice(wholesaleInRetail, { ...markup, currency: retailCurrency });
+  return { native, nativeAmount, wholesaleInRetail, retail: quote.retail };
 }
 
 function groupCost(

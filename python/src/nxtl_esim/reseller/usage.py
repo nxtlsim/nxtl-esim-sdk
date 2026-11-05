@@ -13,7 +13,6 @@ from typing import Any
 
 from ..pricing import quote_price
 from .fx import convert_fx
-from .units import from_bytes
 
 VOLUME_BYTES = ("bytes", "volume_bytes", "data_bytes", "octets")
 VOLUME_MB = ("volume_mb", "data_mb", "usage_mb", "mb")
@@ -36,32 +35,53 @@ def period_bounds(period: Mapping[str, str]) -> dict[str, str]:
     return {"since": period["since"], "until": period["until"]}
 
 
-def normalize_usage_row(raw: Mapping[str, Any]) -> dict[str, Any]:
-    used: list[str] = []
-    row: dict[str, Any] = {"source_keys": used, "raw": dict(raw)}
-    iccid = _string(raw, ("iccid",), used)
-    at = _time(raw, used)
-    amount_usd = _number(raw, ("amount_usd", "usage_usd", "cost_usd"), used)
-    amount_eur = _number(raw, ("amount_eur", "usage_eur", "cost_eur"), used)
+def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual") -> dict[str, Any]:
+    from .ledger import api_charge, parse_utc_timestamp, webhook_charge
+
+    used = [source]
+    amount_usd = _number(raw, ("amount_usd",), used)
+    amount_eur = _number(raw, ("amount_eur",), used)
     currency = _string(raw, ("currency",), used)
-    num_bytes = _bytes(raw, used)
-    country = _country(raw, used)
-    network = _string(raw, ("network", "operator"), used)
+    entry_type = _string(raw, ("entry_type",), used)
+    money = webhook_charge(raw) if source == "webhook" else api_charge({"currency": currency, "amount_usd": amount_usd, "amount_eur": amount_eur})
+    at_raw = _string(raw, TIME_KEYS, used)
+    row: dict[str, Any] = {
+        "source": source,
+        "source_keys": used,
+        "raw": dict(raw),
+        "volume_trusted": False,
+        "charge_kind": money["kind"],
+        "consumption_charge": money["consumption_charge"],
+    }
+    if source == "cdr" and isinstance(raw.get("id"), int):
+        row["ledger_id"] = raw["id"]
+    if source == "webhook" and isinstance(raw.get("id"), str):
+        row["event_id"] = raw["id"]
+    if entry_type:
+        row["entry_type"] = entry_type
+    iccid = _string(raw, ("iccid",), used)
     if iccid:
         row["iccid"] = iccid
-    if at:
-        row["at"] = at
+    if at_raw:
+        row["at"] = parse_utc_timestamp(at_raw)
     if amount_usd is not None:
         row["amount_usd"] = amount_usd
     if amount_eur is not None:
         row["amount_eur"] = amount_eur
-    if currency:
-        row["currency"] = currency
-    if num_bytes is not None:
-        row["bytes"] = num_bytes
-    if country:
-        row["country"] = country
-    if network:
+    if currency or money["currency"]:
+        row["currency"] = currency or money["currency"]
+    trust = source == "manual" or (source == "line_usage" and entry_type == "usage") or (source == "webhook" and (_number(raw, ("bytes",), used) or 0) > 0)
+    if trust:
+        num_bytes = _number(raw, ("bytes",), used) if source in {"line_usage", "webhook"} else _bytes(raw, used)
+        if num_bytes is not None and not (source == "webhook" and num_bytes == 0):
+            row["bytes"] = num_bytes
+            row["volume_trusted"] = True
+        country_keys = ("country", "iso2") if source == "manual" else ("country",)
+        country = _string(raw, country_keys, used)
+        if country and country.strip():
+            row["country"] = country.strip().upper() if source == "manual" and len(country.strip()) == 2 else country.strip()
+    network = _string(raw, ("network", "operator"), used)
+    if network and source != "cdr":
         row["network"] = network
     return row
 
@@ -100,21 +120,19 @@ def cost_usage(rows: Iterable[Mapping[str, Any]], options: Mapping[str, Any] | N
     materialized = list(rows)
     totals["rows"] = len(materialized)
     for row in materialized:
-        if "bytes" in row:
+        if row.get("volume_trusted") and "bytes" in row:
             totals["bytes"] += float(row["bytes"])
             totals["rows_with_volume"] += 1
-        if (row.get("amount_usd") == 0 and row.get("amount_eur") not in (None, 0)) or (
-            row.get("amount_eur") == 0 and row.get("amount_usd") not in (None, 0)
-        ):
+        if row.get("currency") == "EUR" and row.get("amount_usd") == 0 and float(row.get("consumption_charge") or 0) > 0:
             totals["zero_is_not_free"] = True
+        if row.get("source") == "line_usage":
+            continue
         priced = _price_row(row, opts, retail_currency)
         if priced is None:
-            totals["unpriced_rows"] += 1
+            if float(row.get("consumption_charge") or 0) > 0:
+                totals["unpriced_rows"] += 1
             continue
-        if priced["source"] == "api":
-            totals["priced_from_api"] += 1
-        else:
-            totals["priced_from_feed"] += 1
+        totals["priced_from_api"] += 1
         if priced["native"] == "USD":
             totals["wholesale_usd"] += priced["native_amount"]
         if priced["native"] == "EUR":
@@ -156,16 +174,22 @@ def load_usage_details(client: Any, *, period: Mapping[str, str], iccid: str | N
     query: dict[str, Any] = {"since": bounds["since"], "until": bounds["until"], "per_page": 100}
     if iccid:
         query["iccid"] = iccid
-    cdrs = [normalize_usage_row(row) for row in client.iterate_usage_cdrs(**query)]
+    cdrs = [normalize_usage_row(row, "cdr") for row in client.iterate_usage_cdrs(**query)]
     line_rows: list[dict[str, Any]] = []
+    volume_complete = True
     if iccid:
-        payload = client.get_esim_usage(iccid).data
-        line_rows = [normalize_usage_row(row) for row in _extract_rows(payload)]
-        notes.append("GET /esims/{iccid}/usage has no time filters in the spec. Rows with a timestamp are filtered to the period locally.")
-    rows = cdrs or line_rows
-    if not cdrs and line_rows:
-        notes.append("CDR list was empty. Per-line usage rows were used instead.")
-    report = build_usage_report(rows, period, options)
+        try:
+            for row in _iter_line_usage(client, iccid):
+                line_rows.append(normalize_usage_row(row, "line_usage"))
+        except Exception as exc:  # noqa: BLE001
+            volume_complete = False
+            notes.append(str(exc))
+        notes.append("GET /esims/{iccid}/usage has no since/until parameter. Page size is 50. Only entry_type usage supplies bytes and country. CDR placeholders are not used as volume.")
+    else:
+        volume_complete = False
+        notes.append("No ICCID was requested, so per-line volume was not collected. CDR bytes are not measured consumption.")
+    report = build_usage_report([*cdrs, *line_rows], period, options)
+    report["volume_complete"] = volume_complete and bool(iccid)
     report["notes"].extend(notes)
     if include_partner_rollups:
         seconds = _parse(bounds["until"]) - _parse(bounds["since"])
@@ -251,37 +275,18 @@ def _fingerprint(row: Mapping[str, Any]) -> str:
 
 
 def _price_row(row: Mapping[str, Any], options: Mapping[str, Any], retail_currency: str) -> dict[str, Any] | None:
-    native = None
-    native_amount = None
-    source = "api"
-    amount_usd = row.get("amount_usd")
-    amount_eur = row.get("amount_eur")
-    if isinstance(amount_usd, (int, float)) and not (amount_usd == 0 and amount_eur):
-        native, native_amount = "USD", float(amount_usd)
-    elif isinstance(amount_eur, (int, float)):
-        native, native_amount = "EUR", float(amount_eur)
-    elif "bytes" in row and row.get("country") and options.get("pricing"):
-        pricing = options["pricing"]
-        countries = pricing.get("countries") if isinstance(pricing, Mapping) else None
-        match = None
-        for country in countries or []:
-            if str(country.get("iso2", "")).upper() == str(row["country"]).upper():
-                match = country
-                break
-        if match is not None:
-            native = "EUR"
-            native_amount = from_bytes(float(row["bytes"]))["gb"] * float(match["cheapest_eur_per_gb"])
-            source = "feed"
-    if native is None or native_amount is None:
+    if row.get("charge_kind") != "debit" or not row.get("consumption_charge") or row.get("currency") not in {"EUR", "USD"}:
         return None
+    native = str(row["currency"])
+    native_amount = float(row["consumption_charge"])
     fx = options.get("fx")
     if native != retail_currency.upper() and not fx:
         return None
     wholesale = native_amount if native == retail_currency.upper() or not fx else convert_fx(native_amount, native, retail_currency, fx)
     markup = dict(options.get("markup") or {"percentage": 0, "rounding": "nearest"})
     markup["currency"] = retail_currency
-    quote = quote_price(wholesale, markup, country=row.get("country") if isinstance(row.get("country"), str) else None)
-    return {"source": source, "native": native, "native_amount": native_amount, "wholesale_in_retail": wholesale, "retail": quote.retail}
+    quote = quote_price(wholesale, markup)
+    return {"source": "api", "native": native, "native_amount": native_amount, "wholesale_in_retail": wholesale, "retail": quote.retail}
 
 
 def _group(rows: list[Mapping[str, Any]], key_of: Any, options: Mapping[str, Any] | None) -> list[dict[str, Any]]:
@@ -289,6 +294,19 @@ def _group(rows: list[Mapping[str, Any]], key_of: Any, options: Mapping[str, Any
     for row in rows:
         groups.setdefault(key_of(row), []).append(row)
     return [{"key": key, "totals": cost_usage(group, options)} for key, group in groups.items()]
+
+
+def _iter_line_usage(client: Any, iccid: str) -> Any:
+    page = 1
+    while page <= 100:
+        payload = client.get_esim_usage(iccid, page=page).data
+        rows = payload.get("usage") if isinstance(payload, dict) else None
+        if not rows:
+            return
+        yield from rows
+        if len(rows) < 50:
+            return
+        page += 1
 
 
 def _extract_rows(payload: Any) -> list[Mapping[str, Any]]:

@@ -219,9 +219,25 @@ export class NxtlClient {
     return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/wallet`, { options });
   }
 
-  /** GET /esims/{iccid}/usage. */
-  getEsimUsage(iccid: string, options?: CallOptions): Promise<ApiResponse<UsageList>> {
-    return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/usage`, { options });
+  /**
+   * GET /esims/{iccid}/usage.
+   * Page size is fixed at 50. There is no since/until parameter and no pages count.
+   */
+  getEsimUsage(iccid: string, query?: { page?: number }, options?: CallOptions): Promise<ApiResponse<UsageList>> {
+    assertPage(query?.page, undefined);
+    return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/usage`, {
+      query: compactQuery(query),
+      options,
+    });
+  }
+
+  /** Walk GET /esims/{iccid}/usage until a page shorter than 50. */
+  iterateEsimUsage(iccid: string, options?: IterateOptions): AsyncIterable<JsonObject> {
+    const perPage = 50;
+    return iteratePages(
+      (page) => this.getEsimUsage(iccid, { page }, signalOptions(options)),
+      { ...options, perPage },
+    );
   }
 
   /** GET /esims/{iccid}/events. */

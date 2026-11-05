@@ -62,7 +62,7 @@ export function buildCustomerInvoice(input: {
     const markup = Math.max(0, retail - wholesale);
     lines.push({
       kind: "usage",
-      description: `Pay-as-you-go usage ${input.periodSince.slice(0, 10)} to ${input.periodUntil.slice(0, 10)}`,
+      description: `NXTL API charge ${input.periodSince.slice(0, 10)} to ${input.periodUntil.slice(0, 10)}`,
       quantity: input.usage.totals.bytes,
       unit: "bytes",
       wholesale,

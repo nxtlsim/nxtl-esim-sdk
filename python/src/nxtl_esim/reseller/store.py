@@ -88,6 +88,7 @@ class MemoryCustomerStore:
         self.allocations: list[dict[str, Any]] = []
         self.snapshots: list[dict[str, Any]] = []
         self.invoices: list[dict[str, Any]] = []
+        self.applied: list[dict[str, str]] = []
 
     def put_customer(self, customer: Mapping[str, Any]) -> None:
         _upsert(self.customers, dict(customer))
@@ -160,6 +161,16 @@ class MemoryCustomerStore:
             return [item for item in self.invoices if item["customer_id"] == filters["customer_id"]]
         return list(self.invoices)
 
+    def has_applied(self, stream: str, key: str) -> bool:
+        return any(item["stream"] == stream and item["key"] == key for item in self.applied)
+
+    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None) -> None:
+        for entry in wallet or []:
+            self.wallet.append(dict(entry))
+        for item in applied or []:
+            if not self.has_applied(item["stream"], item["key"]):
+                self.applied.append(dict(item))
+
 
 class JsonFileCustomerStore(MemoryCustomerStore):
     """Example adapter. One JSON document. Not safe across processes."""
@@ -188,6 +199,8 @@ class JsonFileCustomerStore(MemoryCustomerStore):
                 super().put_snapshot(item)
             for item in data.get("invoices", []):
                 super().put_invoice(item)
+            for item in data.get("applied", []):
+                super().commit_sync(applied=[item])
         self._loaded = True
 
     def _persist(self) -> None:
@@ -199,6 +212,7 @@ class JsonFileCustomerStore(MemoryCustomerStore):
             "allocations": self.list_allocations(),
             "snapshots": self.list_snapshots(),
             "invoices": self.list_invoices(),
+            "applied": list(self.applied),
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -272,6 +286,15 @@ class JsonFileCustomerStore(MemoryCustomerStore):
     def list_invoices(self, **filters: Any) -> list[dict[str, Any]]:
         self._load()
         return super().list_invoices(**filters)
+
+    def has_applied(self, stream: str, key: str) -> bool:
+        self._load()
+        return super().has_applied(stream, key)
+
+    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None) -> None:
+        self._load()
+        super().commit_sync(wallet, applied)
+        self._persist()
 
 
 class SqlCustomerStore:
@@ -389,6 +412,18 @@ class SqlCustomerStore:
         if filters.get("customer_id"):
             return [item for item in rows if item["customer_id"] == filters["customer_id"]]
         return rows
+
+    def has_applied(self, stream: str, key: str) -> bool:
+        return bool(self.query("SELECT dedup_key FROM nxtl_reseller_applied WHERE stream = ? AND dedup_key = ?", [stream, key]))
+
+    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None) -> None:
+        for entry in wallet or []:
+            self.put_wallet_entry(entry)
+        for item in applied or []:
+            self.query(
+                "INSERT INTO nxtl_reseller_applied (stream, dedup_key) VALUES (?, ?) ON CONFLICT(stream, dedup_key) DO NOTHING",
+                [item["stream"], item["key"]],
+            )
 
 
 def _upsert(items: list[dict[str, Any]], item: dict[str, Any]) -> None:

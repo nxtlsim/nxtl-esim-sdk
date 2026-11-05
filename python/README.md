@@ -2,7 +2,7 @@
 
 Python SDK for the [NXTL eSIM](https://nxtlsim.com) B2B API. Issue and manage pay-as-you-go travel eSIMs, read the pooled balance, and verify signed webhooks.
 
-Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.1** (48 operations) at `https://nxtlsim.com/api/v1`.
+Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.2** (48 operations) at `https://nxtlsim.com/api/v1`.
 
 ```bash
 pip install nxtl-esim
@@ -255,7 +255,9 @@ Customer records, packages, wallets, and customer invoices live in your process.
 
 `load_usage_details` reads `GET /usage/cdrs` and, for one ICCID, `GET /esims/{iccid}/usage`. Periods are daily, monthly, or a custom range. `include_partner_rollups=True` also calls summary, per-eSIM, and timeseries. Those last two day-count endpoints are capped at 365 days.
 
-Wholesale prefers `amount_usd` / `amount_eur`. A zero converted amount is not free usage. Bytes plus a country can be priced from the public EUR-per-GB feed. Reports include `by_line`, `by_day`, `by_month`, and `by_country`. Country groups stay empty unless a row already has a country field. The OpenAPI schema does not name one. `snapshot_usage` and `diff_snapshots` compute the delta between polls. `to_bytes` and `format_data` convert B/KB/MB/GB/TB on a 1000-based scale.
+Reconciled cost uses the native field selected by `currency`. Current usage is EUR: `amount_eur` is a signed retail pool debit and `amount_usd` is `0`. That zero is not an FX conversion and is not free usage. The positive value is the NXTL API charge (reseller acquisition cost), not upstream wholesale. Markup sits on top of it. The public per-GB feed is only for `quote_trip`, not for reconciled charges.
+
+`GET /usage/cdrs` is `{ cdrs, total, page, pages }`. Its bytes and country text are placeholders and are not used for allowances. `GET /esims/{iccid}/usage` is `{ iccid, provider, page, usage }` with 50 rows per page and no date filter. Only `entry_type="usage"` has octets and a country name. `GET /usage/esims` uses the array key `lines`, and the money fields are JSON strings (`parse_rollup_number`). CDR charges and per-line volume are separate streams. Ledger ids are not matched to webhook event ids. `commit_sync` stores dedup keys with the wallet write. A failed volume walk is incomplete, not zero usage.
 
 ### Customers
 

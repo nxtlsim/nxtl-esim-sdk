@@ -192,6 +192,7 @@ export class CustomerDirectory {
       try {
         if (action === "suspend") await this.client.suspendEsim(line.iccid);
         else await this.client.resumeEsim(line.iccid);
+        await this.store.putAssignment({ ...line, manualPause: action === "suspend" });
         results.push({ iccid: line.iccid, ok: true });
       } catch (error) {
         results.push({ iccid: line.iccid, ok: false, error: error instanceof Error ? error.message : action });

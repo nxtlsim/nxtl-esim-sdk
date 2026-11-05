@@ -6,6 +6,7 @@ from .client import NxtlClient
 from .endpoints import API_OPERATIONS
 from .errors import (
     NxtlAccessDeniedError,
+    NxtlAlreadyTerminatedError,
     NxtlAuthError,
     NxtlConflictError,
     NxtlConnectionError,
@@ -15,6 +16,7 @@ from .errors import (
     NxtlNotFoundError,
     NxtlQuotaExceededError,
     NxtlRateLimitError,
+    NxtlResumeBlockedError,
     NxtlServerError,
     NxtlTimeoutError,
     NxtlValidationError,
@@ -84,6 +86,7 @@ __all__ = [
     "DEFAULT_USER_AGENT",
     "ISSUANCE_FEE_CANDIDATE_KEYS",
     "NxtlAccessDeniedError",
+    "NxtlAlreadyTerminatedError",
     "NxtlAuthError",
     "NxtlClient",
     "NxtlConflictError",
@@ -94,6 +97,7 @@ __all__ = [
     "NxtlNotFoundError",
     "NxtlQuotaExceededError",
     "NxtlRateLimitError",
+    "NxtlResumeBlockedError",
     "NxtlServerError",
     "NxtlTimeoutError",
     "NxtlValidationError",

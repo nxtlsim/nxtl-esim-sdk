@@ -1,5 +1,5 @@
 /**
- * Types published by the NXTL B2B OpenAPI document (v2.6.1) plus
+ * Types published by the NXTL B2B OpenAPI document (v2.6.2) plus
  * deliberately loose shapes where that document describes a response
  * but does not publish a schema.
  *
@@ -332,11 +332,48 @@ export type JobAccepted = JsonObject & {
 /** TODO(spec): components.responses.Ack has no schema. */
 export type Ack = JsonObject;
 
-/** TODO(spec): components.responses.Wallet has no schema. ESim.wallet is the closest published object. */
-export type Wallet = JsonObject;
+/**
+ * Live carrier wallet from GET /esims/{iccid}/wallet.
+ * Named by that operation's description: wallet_id, wallet_balance_usd, raw_balance.
+ * This is not a per-line top-up.
+ */
+export interface Wallet {
+  wallet_id?: string | number;
+  wallet_balance_usd?: number;
+  raw_balance?: number;
+}
 
-/** TODO(spec): components.responses.UsageList has no schema. */
-export type UsageList = JsonObject;
+/** GET /esims/{iccid}/usage. Page size is fixed at 50. No total or pages count. */
+export interface EsimUsageRow {
+  entry_type: string;
+  amount_usd: number;
+  amount_eur: number;
+  currency: string;
+  customer_total_after: number | null;
+  /** Ledger write time, `Y-m-d H:i:s`. */
+  created_at: string;
+  note: string;
+  /** Present only when entry_type is `usage`. Octets. */
+  bytes?: number;
+  /** bytes / 1048576. Present only on usage rows. */
+  mb?: number;
+  /** Country name, not an ISO code. Present only on usage rows. */
+  country?: string;
+  operator?: string;
+  rat?: string;
+  mcc?: string;
+  mnc?: string;
+  tadig?: string;
+}
+
+export interface EsimUsageList {
+  iccid: string;
+  provider: string;
+  page: number;
+  usage: EsimUsageRow[];
+}
+
+export type UsageList = EsimUsageList;
 
 /** TODO(spec): components.responses.EventList has no schema. */
 export type EventList = JsonObject;
@@ -365,8 +402,13 @@ export type JobList = JsonObject;
  */
 export type Job = JsonObject;
 
-/** TODO(spec): components.responses.Balance has no schema. */
-export type Balance = JsonObject;
+/**
+ * Pool totals plus stored per-eSIM wallet mirrors.
+ * The item shape of `wallets` is not a published schema. The live read is GET /esims/{iccid}/wallet.
+ */
+export type Balance = JsonObject & {
+  wallets?: JsonObject[];
+};
 
 /** TODO(spec): GET /balance/history 200 is "Ledger entries" with no schema. */
 export type LedgerPage = JsonObject;
@@ -377,14 +419,79 @@ export type InvoiceList = JsonObject;
 /** TODO(spec): GET /usage/summary 200 is "Totals for days, MTD, today" with no schema. */
 export type UsageSummary = JsonObject;
 
+/** JSON strings on the wire. Helpers parse them with parseRollupNumber. */
+export interface UsageEsimRollup {
+  iccid: string;
+  provider: string;
+  tier: string;
+  provision_status: string;
+  usage_usd: string;
+  usage_eur: string;
+  usage_events: string;
+  first_event: string | null;
+  last_event: string | null;
+}
+
+/** GET /usage/esims and GET /usage/lines. The array key is `lines`, not `esims`. */
+export interface UsageEsims {
+  window: { since: string; until: string | null };
+  lines: UsageEsimRollup[];
+}
+
 /**
- * GET /usage/esims describes `{ window, esims: [...] }`.
- * TODO(spec): the item schema is not published.
+ * GET /usage/cdrs row. bytes/mb/country/operator/rat/mcc/mnc/tadig are present
+ * but empty on the current serializer. Do not treat bytes 0 as measured usage.
  */
-export type UsageEsims = JsonObject & {
-  window?: unknown;
-  esims?: JsonObject[];
-};
+export interface Cdr {
+  id: number;
+  iccid: string;
+  provider: string;
+  amount_usd: number;
+  amount_eur: number;
+  currency: string;
+  customer_total_after: number | null;
+  /** Ledger write time, `Y-m-d H:i:s`. Not the supplier session time. */
+  created_at: string;
+  note: string;
+  bytes: number;
+  mb: number;
+  country: string;
+  operator: string;
+  rat: string;
+  mcc: string;
+  mnc: string;
+  tadig: string;
+}
+
+export interface CdrList {
+  cdrs: Cdr[];
+  total: number;
+  page: number;
+  pages: number;
+}
+
+/** data object of usage.recorded. Amounts are absolute. occurred_at is UTC `Y-m-d H:i:s`. */
+export interface UsageRecordedData {
+  iccid: string;
+  esim_id: number;
+  client_reference: string;
+  idempotency_key: string;
+  occurred_at: string;
+  currency: "USD" | "EUR";
+  amount: number;
+  amount_usd: number;
+  amount_eur: number;
+  bytes: number;
+  mb: number;
+  country: string;
+  operator: string;
+  network: string;
+  rat: string;
+  mcc: string;
+  mnc: string;
+  tadig: string;
+  balance_after: number | null;
+}
 
 /**
  * GET /usage/timeseries describes a series of these points.

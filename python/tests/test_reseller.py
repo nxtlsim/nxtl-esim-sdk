@@ -38,23 +38,35 @@ def test_usage_packages_and_invoice() -> None:
     assert to_bytes(1, "GB") == 1_000_000_000
     assert format_data(1_500_000_000) == "1.50 GB"
     api_row = normalize_usage_row({
+        "id": 1,
         "iccid": ICCID,
         "timestamp": "2026-04-02T00:00:00Z",
+        "currency": "EUR",
         "amount_usd": 0,
-        "amount_eur": 1.5,
+        "amount_eur": -1.5,
+        "bytes": 0,
+        "country": "",
+    }, "cdr")
+    assert api_row.get("country") is None
+    assert api_row["consumption_charge"] == 1.5
+    detail = normalize_usage_row({
+        "iccid": ICCID,
+        "entry_type": "usage",
+        "created_at": "2026-04-03 00:00:00",
+        "currency": "EUR",
+        "amount_usd": 0,
+        "amount_eur": -0.5,
         "bytes": 500_000_000,
-        "iso2": "fr",
-    })
-    assert api_row["country"] == "FR"
-    feed_row = normalize_usage_row({"iccid": ICCID, "at": "2026-04-03T00:00:00Z", "iso2": "FR", "volume_mb": 500})
-    report = build_usage_report([api_row, feed_row], {"kind": "monthly", "month": "2026-04"}, {
-        "pricing": {"countries": [{"iso2": "FR", "name": "France", "cheapest_eur_per_gb": 2}]},
+        "country": "France",
+    }, "line_usage")
+    report = build_usage_report([api_row, detail], {"kind": "monthly", "month": "2026-04"}, {
         "markup": {"percentage": 100, "rounding": "nearest", "currency": "EUR"},
         "retail_currency": "EUR",
     })
     assert report["country_breakdown_available"] is True
     assert report["totals"]["zero_is_not_free"] is True
-    assert report["totals"]["retail"] > report["totals"]["wholesale_eur"]
+    assert report["totals"]["wholesale_eur"] == 1.5
+    assert report["totals"]["bytes"] == 500_000_000
     snap = snapshot_usage(report, {"customer_id": "cus_1"})
     assert len(diff_snapshots(None, snap)["added"]) == 2
     assert diff_snapshots(snap, snap)["retail"] == 0
@@ -99,7 +111,7 @@ def test_usage_packages_and_invoice() -> None:
     assert top_up_allocation(by_id["a2"], extra_bytes=1000)["bonus_bytes"] == 1000
 
     usage = build_usage_report([
-        normalize_usage_row({"iccid": ICCID, "at": "2026-04-02T00:00:00Z", "amount_eur": 4, "bytes": 1_000_000_000, "iso2": "FR"}),
+        normalize_usage_row({"id": 9, "iccid": ICCID, "created_at": "2026-04-02 00:00:00", "currency": "EUR", "amount_usd": 0, "amount_eur": -4, "bytes": 0, "country": ""}, "cdr"),
     ], {"kind": "range", "since": "2026-04-01T00:00:00Z", "until": "2026-05-01T00:00:00Z"}, {
         "markup": {"percentage": 50, "rounding": "nearest", "currency": "EUR"},
         "retail_currency": "EUR",
@@ -124,7 +136,7 @@ def test_directory_sync_catalog_and_sql() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/usage/cdrs"):
-            return httpx.Response(200, json={"cdrs": [{"iccid": ICCID, "amount_eur": 3, "bytes": 10, "at": "2026-04-02T00:00:00Z"}]})
+            return httpx.Response(200, json={"cdrs": [{"id": 7, "iccid": ICCID, "currency": "EUR", "amount_eur": -3, "amount_usd": 0, "bytes": 0, "country": "", "created_at": "2026-04-02 00:00:00"}], "total": 1, "page": 1, "pages": 1})
         if path.endswith("/suspend"):
             return httpx.Response(200, json={"ok": True})
         if request.method == "POST" and path.endswith("/esims"):

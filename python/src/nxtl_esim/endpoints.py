@@ -323,12 +323,15 @@ class EndpointMixin:
         self,
         iccid: str,
         options: Mapping[str, Any] | None = None,
+        *,
+        page: int | None = None,
     ) -> ApiResponse[JsonObject]:
-        """GET /esims/{iccid}/usage — Per-line usage rows."""
+        """GET /esims/{iccid}/usage — Per-line ledger rows. Page size is fixed at 50."""
         iccid = validate_iccid(iccid)
         return self._request(
             'GET',
             f"/esims/{encode_path(iccid)}/usage",
+            query={"page": page} if page else None,
             options=options,
         )
 
@@ -1013,12 +1016,15 @@ class AsyncEndpointMixin:
         self,
         iccid: str,
         options: Mapping[str, Any] | None = None,
+        *,
+        page: int | None = None,
     ) -> ApiResponse[JsonObject]:
-        """GET /esims/{iccid}/usage — Per-line usage rows."""
+        """GET /esims/{iccid}/usage — Per-line ledger rows. Page size is fixed at 50."""
         iccid = validate_iccid(iccid)
         return await self._request(
             'GET',
             f"/esims/{encode_path(iccid)}/usage",
+            query={"page": page} if page else None,
             options=options,
         )
 

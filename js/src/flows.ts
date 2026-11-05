@@ -17,6 +17,7 @@ import type {
   JsonObject,
   Quotas,
   ThresholdRule,
+  UsageEsims,
   UsageEsimsQuery,
   UsageSummaryQuery,
 } from "./types.js";
@@ -288,7 +289,7 @@ export async function ensureBalanceThreshold(
 export interface UsageReport {
   summary: ApiResponse<JsonObject>;
   timeseries: ApiResponse<JsonObject>;
-  esims: ApiResponse<JsonObject>;
+  esims: ApiResponse<UsageEsims>;
   cdrs?: JsonObject[];
   /**
    * Sum of `amount_usd` / `amount_eur` when those properties exist on CDR rows.

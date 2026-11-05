@@ -40,31 +40,39 @@ describe("reseller usage and packages", () => {
     const apiRow = normalizeUsageRow({
       iccid: ICCID,
       timestamp: "2026-04-02T00:00:00.000Z",
+      currency: "EUR",
       amount_usd: 0,
-      amount_eur: 1.5,
+      amount_eur: -1.5,
       bytes: 500_000_000,
-      iso2: "fr",
-      network: "Orange",
-    });
-    assert.equal(apiRow.country, "FR");
-    assert.equal(apiRow.amountEur, 1.5);
-    const feedRow = normalizeUsageRow({
-      iccid: ICCID,
-      at: "2026-04-03T00:00:00.000Z",
-      iso2: "FR",
-      volume_mb: 500,
-    });
-    const report = buildUsageReport([apiRow, feedRow], { kind: "monthly", month: "2026-04" }, {
-      pricing: { countries: [{ iso2: "FR", name: "France", cheapest_eur_per_gb: 2 }] },
+      country: "France",
+    }, "cdr");
+    assert.equal(apiRow.country, undefined);
+    assert.equal(apiRow.bytes, undefined);
+    assert.equal(apiRow.consumptionCharge, 1.5);
+    assert.equal(apiRow.volumeTrusted, false);
+    const measured = normalizeUsageRow({
+      ...({
+        iccid: ICCID,
+        created_at: "2026-04-03 00:00:00",
+        currency: "EUR",
+        amount_usd: 0,
+        amount_eur: -0.5,
+        entry_type: "usage",
+        bytes: 500_000_000,
+        country: "France",
+      }),
+    }, "line_usage");
+    assert.equal(measured.volumeTrusted, true);
+    assert.equal(measured.country, "France");
+    const report = buildUsageReport([apiRow, measured], { kind: "monthly", month: "2026-04" }, {
       markup: { percentage: 100, rounding: "nearest", currency: "EUR" },
       retailCurrency: "EUR",
     });
     assert.equal(report.countryBreakdownAvailable, true);
-    assert.equal(report.byCountry[0]?.key, "FR");
+    assert.equal(report.byCountry[0]?.key, "France");
     assert.equal(report.totals.zeroIsNotFree, true);
-    assert.ok(report.totals.wholesaleEur > 0);
+    assert.equal(report.totals.wholesaleEur, 1.5);
     assert.ok(report.totals.retail > report.totals.wholesaleEur);
-    assert.ok(report.totals.margin > 0);
     const snap = snapshotUsage(report, { customerId: "cus_1" });
     const delta = diffSnapshots(undefined, snap);
     assert.equal(delta.added.length, 2);
@@ -114,7 +122,7 @@ describe("reseller usage and packages", () => {
   it("builds an invoice, csv export, and margin report with reseller FX", () => {
     assert.equal(convertFx(10, "EUR", "USD", { base: "USD", rates: { EUR: 1.1 } }), 11);
     const usage = buildUsageReport([
-      normalizeUsageRow({ iccid: ICCID, at: "2026-04-02T00:00:00.000Z", amount_eur: 4, bytes: 1_000_000_000, iso2: "FR" }),
+      normalizeUsageRow({ iccid: ICCID, at: "2026-04-02T00:00:00.000Z", currency: "EUR", amount_usd: 0, amount_eur: -4, entry_type: "usage", bytes: 1_000_000_000, country: "France" }, "line_usage"),
     ], { kind: "range", since: "2026-04-01T00:00:00.000Z", until: "2026-05-01T00:00:00.000Z" }, {
       markup: { percentage: 50, rounding: "nearest", currency: "EUR" },
       retailCurrency: "EUR",
@@ -188,7 +196,7 @@ describe("reseller customers and ops", () => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("/usage/cdrs")) {
         return new Response(JSON.stringify({
-          cdrs: [{ iccid: ICCID, amount_eur: 3, bytes: 10, at: "2026-04-02T00:00:00.000Z" }],
+          cdrs: [{ id: 7, iccid: ICCID, currency: "EUR", amount_eur: -3, amount_usd: 0, bytes: 0, country: "", created_at: "2026-04-02 00:00:00" }],
         }), { status: 200 });
       }
       return new Response("{}", { status: 200 });

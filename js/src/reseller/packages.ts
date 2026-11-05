@@ -196,7 +196,7 @@ function effectiveCap(allocation: PackageAllocation, pkg: SellablePackage): numb
  * `line_usage_usd_today`. None of them is a multi-day byte cap.
  * When the package sets `usdCap`, this creates a daily USD rule. Otherwise it
  * does not call the API.
- * TODO(spec): a GB allowance cannot be enforced as a NXTL threshold.
+ * A GB allowance cannot be enforced as a NXTL threshold. USD rules do not see current EUR charges where amount_usd is 0. The stored period is ignored.
  */
 export async function syncPackageThreshold(
   client: NxtlClient,
@@ -219,6 +219,21 @@ export async function syncPackageThreshold(
     notes: { cap_per_line_usd: pkg.usdCap },
   });
   return { created: true };
+}
+
+export async function renewLine(
+  client: NxtlClient,
+  allocation: PackageAllocation,
+  pkg: SellablePackage,
+  manualPause: boolean,
+): Promise<{ allocation: PackageAllocation; resumed: boolean }> {
+  const next = renewAllocation(allocation, pkg);
+  let resumed = false;
+  if (pkg.resumeOnRenewal && allocation.iccid && !manualPause) {
+    await client.resumeEsim(allocation.iccid);
+    resumed = true;
+  }
+  return { allocation: next, resumed };
 }
 
 export async function suspendOverageLines(

@@ -21,7 +21,7 @@ def build_customer_invoice(**inputs: Any) -> dict[str, Any]:
         retail = _convert(float(usage["totals"]["retail"]), retail_currency, currency, fx)
         lines.append({
             "kind": "usage",
-            "description": f"Pay-as-you-go usage {usage['since'][:10]} to {usage['until'][:10]}",
+            "description": f"NXTL API charge {usage['since'][:10]} to {usage['until'][:10]}",
             "quantity": usage["totals"]["bytes"],
             "unit": "bytes",
             "wholesale": wholesale,

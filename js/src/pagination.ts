@@ -3,11 +3,11 @@ import type { ApiResponse, IterateOptions, JsonObject } from "./types.js";
 /**
  * Best-effort item extractor.
  *
- * TODO(spec): paginated responses (audit, eSIMs, balance history, CDRs,
- * deliveries, jobs) do not publish an envelope schema. The helper reads
- * a bare array or the first array under a small set of likely keys, and
- * stops on an empty page, a short page when `perPage` is known, a repeated
- * first item, `has_more: false`, or `total_pages` when those fields exist.
+ * CDR pages publish `{ cdrs, total, page, pages }`. Per-line usage publishes
+ * `{ usage, page }` with a fixed page size of 50 and no page count.
+ * Other list envelopes are still undescribed. The helper reads a bare array
+ * or the first array under known keys, and stops on an empty page, a short
+ * page when `perPage` is known, a repeated first item, or `pages`.
  */
 const ITEM_KEYS = [
   "data",
@@ -19,6 +19,8 @@ const ITEM_KEYS = [
   "rules",
   "events",
   "cdrs",
+  "usage",
+  "lines",
   "jobs",
   "deliveries",
   "audit",

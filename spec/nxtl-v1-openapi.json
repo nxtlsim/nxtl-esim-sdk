@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NXTL B2B API",
-    "version": "2.6.1",
+    "version": "2.6.2",
     "description": "Partner REST API. Authenticate every request with `X-NXTL-Key: <secret>` (the value returned once when the key is created). Send `Idempotency-Key` (or legacy `X-NXTL-Idempotency-Key`) on every POST that creates a resource \u2014 replays return the original outcome plus `Idempotent-Replayed: true`. Errors come back in a uniform envelope (`type`, `code`, `message`, `request_id`, `doc_url`). Webhook bodies are signed with HMAC-SHA256 \u2014 verify using the timestamped `X-NXTL-Signature-V1: t=<unix>,v1=<hex>` header.",
     "contact": {
       "name": "NXTL Support",
@@ -402,7 +402,8 @@
         "tags": [
           "eSIMs"
         ],
-        "summary": "Suspend / reactivate / terminate",
+        "summary": "Suspend, reactivate, or terminate",
+        "description": "Body action is suspend, reactivate, or terminate. suspend pauses data and can be reversed with reactivate. POST /esims/{iccid}/resume is the same reactivate action. terminate sets the carrier subscriber to DISCONNECTED and cannot be undone: a later reactivate returns 409 already_terminated. reactivate can also return 402 when balance or a usage guard blocks resume. There is no DELETE eSIM route.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Iccid"
@@ -427,6 +428,7 @@
           "eSIMs"
         ],
         "summary": "Suspend alias",
+        "description": "Same as PATCH /esims/{iccid}/status with action suspend. Reversible. Resume with POST /esims/{iccid}/resume or PATCH action reactivate.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Iccid"
@@ -445,6 +447,7 @@
           "eSIMs"
         ],
         "summary": "Reactivate alias",
+        "description": "Same as PATCH /esims/{iccid}/status with action reactivate. Does not restore a terminated eSIM (409 already_terminated). May return 402 resume_blocked or insufficient_balance.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Iccid"
@@ -462,7 +465,8 @@
         "tags": [
           "eSIMs"
         ],
-        "summary": "Wallet snapshot",
+        "summary": "Live carrier wallet read",
+        "description": "Read-only live fetch of the carrier wallet for this ICCID. Returns wallet_id, wallet_balance_usd (normalized number) and raw_balance (carrier number). Does not add credit. There is no per-eSIM top-up or allocation route. Pool credit is POST /topup. GET /balance wallets[] is the stored mirror, not this live read.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Iccid"
@@ -480,15 +484,30 @@
         "tags": [
           "Usage"
         ],
-        "summary": "Per-line usage rows",
+        "summary": "Per-line ledger rows, with usage detail on usage entries",
+        "description": "Scope esims:read. Returns every ledger row for the ICCID, newest first, 50 per page. Only rows with entry_type usage include bytes, mb, country, operator, rat, mcc, mnc and tadig. Those values are joined from stored usage detail by idempotency key. amount_usd and amount_eur are signed ledger numbers (usage is negative). For current EUR usage, amount_usd is 0 and amount_eur is the retail EUR debit. A zero amount_usd is not free usage. created_at is the ledger timestamp string. Supplier session time, session id and wholesale cost are stored internally and are not returned.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Iccid"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "description": "Page number. Page size is fixed at 50. The response has no total or pages count."
           }
         ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/UsageList"
+          },
+          "404": {
+            "description": "ICCID is not on this partner account. Body is { \"error\": \"not_found\" }."
           }
         }
       }
@@ -712,7 +731,7 @@
             "$ref": "#/components/responses/InsufficientBalance"
           }
         },
-        "description": "Credits the pooled balance from the partner prepaid budget (budget_usd) by amount_usd. Does not charge a saved card or create an external payment. Returns 402 when the prepaid budget is smaller than the requested amount. Send Idempotency-Key so a retry returns the original credit."
+        "description": "Credits the partner pooled balance from prepaid budget_usd by amount_usd. The request has no ICCID and does not fund one eSIM. Does not charge a saved card. Returns 402 when prepaid budget is smaller than the amount. Send Idempotency-Key so a retry returns the original credit. There is no per-eSIM top-up or allocation endpoint."
       }
     },
     "/invoices": {
@@ -756,7 +775,8 @@
         "tags": [
           "Usage"
         ],
-        "summary": "Per-eSIM aggregates (top-N + filter)",
+        "summary": "Per-eSIM money rollups",
+        "description": "Scope usage:read or esims:read. Response object is { window, lines }. The array key is lines, not esims. Each line has iccid, provider, tier, provision_status, usage_usd, usage_eur, usage_events, first_event and last_event. usage_usd, usage_eur and usage_events are JSON strings because they are returned from SQL without a numeric cast. first_event and last_event are datetime strings or null when the line has no usage in the window. This endpoint does not return bytes, country or network identifiers. since defaults to the first instant of the current UTC month. until is exclusive when set.",
         "parameters": [
           {
             "name": "since",
@@ -793,7 +813,14 @@
         ],
         "responses": {
           "200": {
-            "description": "{ window, esims: [...] }"
+            "description": "Object with window and lines. See UsageEsimList. The array key is lines, not esims.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageEsimList"
+                }
+              }
+            }
           }
         }
       }
@@ -807,7 +834,14 @@
         "deprecated": true,
         "responses": {
           "200": {
-            "description": "Same response shape as /usage/esims."
+            "description": "Same response shape as /usage/esims: { window, lines }.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageEsimList"
+                }
+              }
+            }
           }
         }
       }
@@ -817,7 +851,8 @@
         "tags": [
           "Usage"
         ],
-        "summary": "Itemised usage events (CDR-equivalent)",
+        "summary": "Itemised usage ledger rows",
+        "description": "Scope usage:read or balance:read. One object per ledger row with entry_type usage. Envelope is { cdrs, total, page, pages }. id is the ledger row id (stable integer). amount_usd and amount_eur are signed JSON numbers copied from the ledger, so a usage debit is negative. currency is the ledger currency string. customer_total_after is the balance after that row, or null. created_at is the ledger datetime string, not the supplier session time. bytes, mb, country, operator, rat, mcc, mnc and tadig are always present. On the current serializer they are empty (bytes 0, text fields empty) because the usage-detail join only runs when entry_type is already on the selected row, and this query does not select entry_type. Country and volume for the same event are on GET /esims/{iccid}/usage and on usage.recorded. There is no amount field and no idempotency_key on this response. For current EUR usage, amount_usd is 0 and amount_eur is the negative retail EUR charge. Zero amount_usd does not mean the usage was free.",
         "parameters": [
           {
             "name": "iccid",
@@ -862,7 +897,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Paginated CDR list."
+            "description": "Paginated CDR list. bytes and country are present but empty on the current serializer. See CdrList.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CdrList"
+                }
+              }
+            }
           }
         }
       }
@@ -1209,6 +1251,27 @@
       }
     }
   },
+
+  "webhooks": {
+    "usageRecorded": {
+      "post": {
+        "operationId": "usageRecorded",
+        "summary": "usage.recorded",
+        "description": "Sent after a billable usage debit on a partner line when the partner is subscribed to usage.recorded. Amounts are absolute retail charges. For current EUR profiles amount_usd is 0. bytes and country come from the debit context and are populated for OCS usage. Supplier session id, period_start and wholesale cost are not included.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UsageRecordedEnvelope" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Any HTTP 2xx acknowledges the delivery." }
+        }
+      }
+    }
+  },
   "components": {
     "securitySchemes": {
       "ApiKeyAuth": {
@@ -1401,6 +1464,7 @@
           },
           "metric": {
             "type": "string",
+            "description": "balance_below compares the live partner pool in USD. line_usage_pct is UTC month-to-date ABS(amount_usd) divided by notes.cap_per_line_usd, times 100. line_usage_usd_today is UTC calendar-day ABS(amount_usd). There is no byte or GB metric.",
             "enum": [
               "balance_below",
               "line_usage_pct",
@@ -1422,6 +1486,7 @@
           },
           "period": {
             "type": "string",
+            "description": "Accepted and stored, but the evaluator does not read it. line_usage_pct is always the UTC calendar month. line_usage_usd_today is always the UTC calendar day. An arbitrary multi-day GB allowance is not enforced here and must be accounted by the reseller.",
             "enum": [
               "instant",
               "daily",
@@ -1431,6 +1496,7 @@
           },
           "action": {
             "type": "string",
+            "description": "notify sends the threshold webhook and email. suspend enqueues a reversible line suspend for the ICCID that crossed the rule. It does not terminate the eSIM.",
             "enum": [
               "notify",
               "suspend"
@@ -1443,7 +1509,8 @@
             "type": "object",
             "properties": {
               "cap_per_line_usd": {
-                "type": "number"
+                "type": "number",
+                "description": "USD money cap used only by line_usage_pct. Not gigabytes. Optional notes.cap_per_line_currency is converted to USD before storage and is not kept as a separate public field."
               },
               "min_renotify_seconds": {
                 "type": "integer"
@@ -1477,6 +1544,226 @@
           "data": {
             "type": "object",
             "additionalProperties": true
+          }
+        }
+      },
+      "Cdr": {
+        "type": "object",
+        "description": "One usage ledger row as returned by GET /usage/cdrs. bytes and country are present but empty on the current serializer.",
+        "required": ["id", "iccid", "provider", "amount_usd", "amount_eur", "currency", "customer_total_after", "created_at", "note", "bytes", "mb", "country", "operator", "rat", "mcc", "mnc", "tadig"],
+        "properties": {
+          "id": { "type": "integer", "description": "Stable ledger row id." },
+          "iccid": { "type": "string" },
+          "provider": { "type": "string", "description": "Carrier family, for example ocs." },
+          "amount_usd": { "type": "number", "description": "Signed ledger USD. 0 on current EUR usage debits. Not a converted price and not proof of free usage." },
+          "amount_eur": { "type": "number", "description": "Signed ledger EUR. A usage debit is negative. This is the retail EUR charged to the pooled balance." },
+          "currency": { "type": "string", "description": "Ledger currency. EUR for current OCS usage. May be an empty string on older rows." },
+          "customer_total_after": { "type": ["number", "null"], "description": "Pooled balance after this row, in the row currency." },
+          "created_at": { "type": "string", "description": "Ledger write time, Y-m-d H:i:s. Not the supplier session time." },
+          "note": { "type": "string" },
+          "bytes": { "type": "integer", "description": "Declared octets. Currently always 0 on this endpoint." },
+          "mb": { "type": "number", "description": "bytes/1048576, four decimal places. Currently 0 on this endpoint." },
+          "country": { "type": "string", "description": "Network country name. Currently empty on this endpoint." },
+          "operator": { "type": "string" },
+          "rat": { "type": "string", "description": "Radio access technology, such as LTE." },
+          "mcc": { "type": "string" },
+          "mnc": { "type": "string" },
+          "tadig": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "CdrList": {
+        "type": "object",
+        "required": ["cdrs", "total", "page", "pages"],
+        "properties": {
+          "cdrs": { "type": "array", "items": { "$ref": "#/components/schemas/Cdr" } },
+          "total": { "type": "integer" },
+          "page": { "type": "integer" },
+          "pages": { "type": "integer" }
+        },
+        "additionalProperties": false,
+        "example": {
+          "cdrs": [{
+            "id": 1001,
+            "iccid": "8900000000000000001",
+            "provider": "ocs",
+            "amount_usd": 0,
+            "amount_eur": -0.42,
+            "currency": "EUR",
+            "customer_total_after": 18.75,
+            "created_at": "2026-07-31 12:00:05",
+            "note": "Data usage",
+            "bytes": 0,
+            "mb": 0,
+            "country": "",
+            "operator": "",
+            "rat": "",
+            "mcc": "",
+            "mnc": "",
+            "tadig": ""
+          }],
+          "total": 1,
+          "page": 1,
+          "pages": 1
+        }
+      },
+      "EsimUsageRow": {
+        "type": "object",
+        "description": "One ledger row from GET /esims/{iccid}/usage. Network and volume fields exist only when entry_type is usage.",
+        "required": ["entry_type", "amount_usd", "amount_eur", "currency", "customer_total_after", "created_at", "note"],
+        "properties": {
+          "entry_type": { "type": "string" },
+          "amount_usd": { "type": "number", "description": "Signed. 0 on current EUR usage debits." },
+          "amount_eur": { "type": "number", "description": "Signed retail EUR. Usage debits are negative." },
+          "currency": { "type": "string" },
+          "customer_total_after": { "type": ["number", "null"] },
+          "created_at": { "type": "string", "description": "Ledger write time, Y-m-d H:i:s." },
+          "note": { "type": "string" },
+          "bytes": { "type": "integer", "description": "Octets. Present only on entry_type usage." },
+          "mb": { "type": "number", "description": "bytes/1048576, four decimal places. Present only on entry_type usage." },
+          "country": { "type": "string", "description": "Country name from pricing, not an ISO code. Present only on entry_type usage." },
+          "operator": { "type": "string" },
+          "rat": { "type": "string" },
+          "mcc": { "type": "string" },
+          "mnc": { "type": "string" },
+          "tadig": { "type": "string" }
+        }
+      },
+      "EsimUsageList": {
+        "type": "object",
+        "required": ["iccid", "provider", "usage", "page"],
+        "properties": {
+          "iccid": { "type": "string" },
+          "provider": { "type": "string" },
+          "usage": { "type": "array", "items": { "$ref": "#/components/schemas/EsimUsageRow" } },
+          "page": { "type": "integer" }
+        },
+        "additionalProperties": false,
+        "example": {
+          "iccid": "8900000000000000001",
+          "provider": "ocs",
+          "page": 1,
+          "usage": [{
+            "entry_type": "usage",
+            "amount_usd": 0,
+            "amount_eur": -0.42,
+            "currency": "EUR",
+            "customer_total_after": 18.75,
+            "created_at": "2026-07-31 12:00:05",
+            "note": "Data usage",
+            "bytes": 1048576,
+            "mb": 1,
+            "country": "Germany",
+            "operator": "Telekom",
+            "rat": "LTE",
+            "mcc": "262",
+            "mnc": "01",
+            "tadig": "D1DEU"
+          }]
+        }
+      },
+      "UsageEsimRollup": {
+        "type": "object",
+        "required": ["iccid", "provider", "tier", "provision_status", "usage_usd", "usage_eur", "usage_events", "first_event", "last_event"],
+        "properties": {
+          "iccid": { "type": "string" },
+          "provider": { "type": "string" },
+          "tier": { "type": "string" },
+          "provision_status": { "type": "string" },
+          "usage_usd": { "type": "string", "description": "ABS(amount_usd) sum. JSON string, not a number." },
+          "usage_eur": { "type": "string", "description": "ABS(amount_eur) sum. JSON string, not a number. This is retail EUR, not wholesale." },
+          "usage_events": { "type": "string", "description": "Count of usage rows. JSON string." },
+          "first_event": { "type": ["string", "null"] },
+          "last_event": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      },
+      "UsageEsimList": {
+        "type": "object",
+        "required": ["window", "lines"],
+        "properties": {
+          "window": {
+            "type": "object",
+            "required": ["since", "until"],
+            "properties": {
+              "since": { "type": "string" },
+              "until": { "type": ["string", "null"] }
+            }
+          },
+          "lines": { "type": "array", "items": { "$ref": "#/components/schemas/UsageEsimRollup" } }
+        },
+        "additionalProperties": false,
+        "example": {
+          "window": { "since": "2026-07-01 00:00:00", "until": null },
+          "lines": [{
+            "iccid": "8900000000000000001",
+            "provider": "ocs",
+            "tier": "cheapest",
+            "provision_status": "ready",
+            "usage_usd": "0.0000",
+            "usage_eur": "0.4200",
+            "usage_events": "1",
+            "first_event": "2026-07-31 12:00:05",
+            "last_event": "2026-07-31 12:00:05"
+          }]
+        }
+      },
+      "UsageRecordedData": {
+        "type": "object",
+        "description": "data object of the usage.recorded webhook. Amounts are absolute. amount_usd is 0 for current EUR debits.",
+        "required": ["iccid", "esim_id", "client_reference", "idempotency_key", "occurred_at", "currency", "amount", "amount_usd", "amount_eur", "bytes", "mb", "country", "operator", "network", "rat", "mcc", "mnc", "tadig", "balance_after"],
+        "properties": {
+          "iccid": { "type": "string" },
+          "esim_id": { "type": "integer", "description": "Internal line id." },
+          "client_reference": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "occurred_at": { "type": "string", "description": "UTC processing time, Y-m-d H:i:s. Not the supplier session timestamp." },
+          "currency": { "type": "string", "enum": ["USD", "EUR"] },
+          "amount": { "type": "number", "description": "Absolute charge in currency. Retail amount debited from the pool." },
+          "amount_usd": { "type": "number", "description": "Absolute USD. 0 when currency is EUR. Not an FX conversion." },
+          "amount_eur": { "type": "number", "description": "Absolute EUR retail charge." },
+          "bytes": { "type": "integer", "description": "Octets. 0 on the legacy USD debit path that does not pass volume." },
+          "mb": { "type": "number", "description": "bytes/1048576, four decimal places." },
+          "country": { "type": "string", "description": "Country name. Empty string when the debit context has none." },
+          "operator": { "type": "string" },
+          "network": { "type": "string", "description": "operator, or country when operator is empty." },
+          "rat": { "type": "string" },
+          "mcc": { "type": "string" },
+          "mnc": { "type": "string" },
+          "tadig": { "type": "string" },
+          "balance_after": { "type": ["number", "null"], "description": "Pool balance after the debit, in currency." }
+        },
+        "additionalProperties": false
+      },
+      "UsageRecordedEnvelope": {
+        "allOf": [
+          { "$ref": "#/components/schemas/WebhookEnvelope" }
+        ],
+        "description": "Outbound usage.recorded body. The envelope data object is UsageRecordedData.",
+        "example": {
+          "id": "evt_constructed0001",
+          "event": "usage.recorded",
+          "timestamp": 1785499200,
+          "data": {
+            "iccid": "8900000000000000001",
+            "esim_id": 9012,
+            "client_reference": "PNR-8F2Q",
+            "idempotency_key": "ocs_usage_constructed",
+            "occurred_at": "2026-07-31 12:00:05",
+            "currency": "EUR",
+            "amount": 0.42,
+            "amount_usd": 0,
+            "amount_eur": 0.42,
+            "bytes": 1048576,
+            "mb": 1,
+            "country": "Germany",
+            "operator": "Telekom",
+            "network": "Telekom",
+            "rat": "LTE",
+            "mcc": "262",
+            "mnc": "01",
+            "tadig": "D1DEU",
+            "balance_after": 18.75
           }
         }
       }
@@ -1718,7 +2005,12 @@
         "description": "Wallet snapshot."
       },
       "UsageList": {
-        "description": "Per-line usage rows."
+        "description": "Per-line ledger rows. Volume and country are present only on entry_type usage.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/EsimUsageList" }
+          }
+        }
       },
       "EventList": {
         "description": "Per-line ledger events."

@@ -10,7 +10,9 @@ import type { PricingFeed } from "../catalog.js";
 import type { FxTable } from "./fx.js";
 import { suspendOverageLines } from "./packages.js";
 import type { CustomerDirectory } from "./customers.js";
-import type { UsagePeriod } from "./usage.js";
+import type { NormalizedUsageRow, UsagePeriod } from "./usage.js";
+import { createIdempotencyKey } from "../util.js";
+import type { WalletEntry } from "./store.js";
 
 export type AlertHandler = (alert: ResellerAlert) => void | Promise<void>;
 
@@ -94,19 +96,45 @@ export async function syncReseller(directory: CustomerDirectory, options: SyncOp
     const lines = await directory.store.listAssignments({ customerId: customer.id, activeOnly: true });
     if (lines.length === 0) continue;
     const report = await directory.customerUsage(customer.id, options.period, options);
-    const { delta } = await directory.recordSnapshot(customer.id, report);
-    if (delta.retail > 0 || delta.bytes > 0) {
-      const alert: ResellerAlert = { type: "usage_delta", customerId: customer.id, retail: delta.retail, margin: delta.margin, bytes: delta.bytes };
+    const freshMoney = [];
+    for (const row of report.rows) {
+      if (row.source !== "cdr" || row.ledgerId === undefined) continue;
+      if (await directory.store.hasApplied("cdr", String(row.ledgerId))) continue;
+      freshMoney.push(row);
+    }
+    const freshDetail = [];
+    for (const row of report.rows) {
+      if (!row.volumeTrusted || row.source !== "line_usage") continue;
+      const key = lineDetailKey(row);
+      if (await directory.store.hasApplied("line_usage", key)) continue;
+      freshDetail.push(row);
+    }
+    const moneyReport = { ...report, rows: freshMoney };
+    const charge = moneyReport.rows.reduce((sum, row) => sum + (row.chargeKind === "debit" ? row.consumptionCharge ?? 0 : 0), 0);
+    const credit = moneyReport.rows.reduce((sum, row) => {
+      if (row.chargeKind !== "credit") return sum;
+      const signed = row.currency === "USD" ? row.amountUsd ?? 0 : row.amountEur ?? 0;
+      return sum + Math.abs(signed);
+    }, 0);
+    const currency = report.totals.retailCurrency ?? "EUR";
+    const wallet = [];
+    const applied = [];
+    if (charge > 0) {
+      wallet.push(await unsavedEntry(customer.id, "debit", charge, currency, "NXTL API charge"));
+      const alert: ResellerAlert = { type: "usage_delta", customerId: customer.id, retail: charge, margin: 0, bytes: 0 };
       alerts.push(alert);
       await options.onAlert?.(alert);
-      const currency = report.totals.retailCurrency ?? "EUR";
-      if (delta.retail > 0) await directory.debit(customer.id, delta.retail, currency, "Usage since last snapshot", report.until);
     }
-    const consumption = await directory.applyPackages(
-      customer.id,
-      { ...report, rows: delta.added },
-      options.packageMode ?? "fifo",
-    );
+    if (credit > 0) wallet.push(await unsavedEntry(customer.id, "credit", credit, currency, "NXTL API credit"));
+    for (const row of freshMoney) {
+      if (row.ledgerId !== undefined) applied.push({ stream: "cdr" as const, key: String(row.ledgerId) });
+    }
+    let consumption = { allocations: [] as Awaited<ReturnType<CustomerDirectory["applyPackages"]>>["allocations"], overageBytes: 0 };
+    if (report.volumeComplete) {
+      consumption = await directory.applyPackages(customer.id, { ...report, rows: freshDetail }, options.packageMode ?? "fifo");
+      for (const row of freshDetail) applied.push({ stream: "line_usage" as const, key: lineDetailKey(row) });
+    }
+    if (wallet.length > 0 || applied.length > 0) await directory.store.commitSync({ wallet, applied });
     if (options.suspendOverage) {
       const packages = await directory.store.listPackages();
       await suspendOverageLines(directory.client, consumption.allocations, packages);
@@ -136,6 +164,22 @@ export async function syncReseller(directory: CustomerDirectory, options: SyncOp
 }
 
 /** Local timer. Call `stop` to clear it. This is not an API scheduler. */
+function lineDetailKey(row: NormalizedUsageRow): string {
+  return [row.iccid ?? "", row.entryType ?? "", row.at ?? "", row.amountEur ?? "", row.amountUsd ?? "", row.bytes ?? "", row.country ?? ""].join("|");
+}
+
+async function unsavedEntry(customerId: string, kind: WalletEntry["kind"], amount: number, currency: string, memo: string): Promise<WalletEntry> {
+  return {
+    id: `wal_${(await createIdempotencyKey()).slice(0, 8)}`,
+    customerId,
+    at: new Date().toISOString(),
+    kind,
+    amount,
+    currency,
+    memo,
+  };
+}
+
 export function scheduleSync(run: () => Promise<void>, intervalMs: number): { stop: () => void } {
   if (intervalMs < 1000) throw new TypeError("intervalMs must be >= 1000");
   const timer = setInterval(() => {

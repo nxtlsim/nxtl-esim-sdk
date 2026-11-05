@@ -2,7 +2,7 @@
 
 Official JavaScript/TypeScript and Python SDKs for the [NXTL eSIM](https://nxtlsim.com) B2B REST API. Issue, resell, and manage pay-as-you-go travel eSIMs against a pooled business balance.
 
-API access belongs to an approved business account. Create the account and an API key at [NXTL for Business](https://nxtlsim.com/for-business/). The human reference is the [NXTL eSIM API documentation](https://nxtlsim.com/nxtl-api-reference/). The machine contract checked into `spec/nxtl-v1-openapi.json` is OpenAPI 2.6.1 (48 operations) from `https://nxtlsim.com/wp-content/plugins/nxtl-data-esim-v2/docs/nxtl-v1-openapi.json`.
+API access belongs to an approved business account. Create the account and an API key at [NXTL for Business](https://nxtlsim.com/for-business/). The human reference is the [NXTL eSIM API documentation](https://nxtlsim.com/nxtl-api-reference/). The machine contract checked into `spec/nxtl-v1-openapi.json` is OpenAPI 2.6.2 (48 operations) from `https://nxtlsim.com/wp-content/plugins/nxtl-data-esim-v2/docs/nxtl-v1-openapi.json`.
 
 | Package | Path | Install |
 | --- | --- | --- |
@@ -75,7 +75,9 @@ The OpenAPI document names every operation and fully schemas errors, eSIM object
 - Some earlier operations can return `{ "error": "code" }` instead of the structured envelope. The error parser accepts both. HTTP status selects the exception class.
 - No separate public sandbox base URL is documented. Point `baseUrl` / `base_url` at the host you were given.
 - There is no customer, package, or customer-invoice resource. Those SDKs records are reseller-side. `GET /invoices` lists orders for API pool top-ups.
-- CDR and per-line usage schemas do not name country or bytes. Country and volume breakdowns are filled only when a row already has those keys. Otherwise wholesale cost uses `amount_usd` / `amount_eur`.
+- `GET /usage/cdrs` publishes bytes and country, but the current serializer leaves them empty. They are not measured consumption. Volume and country names come from `GET /esims/{iccid}/usage` when `entry_type` is `usage`, and from `usage.recorded`.
+- `amount_usd: 0` on a EUR debit is not an FX rate and is not free usage. The API does not expose upstream wholesale cost. USD threshold rules use `ABS(amount_usd)` and do not observe that EUR charge. `period` is stored and ignored by the evaluator. Rules run on the minute tick after usage polling (default 600 seconds, 12-hour supplier-lag lookback).
+- Per-line usage rows have no ledger id, so they are not joined to CDR ids or webhook event ids.
 - Threshold metrics are `balance_below`, `line_usage_pct`, and `line_usage_usd_today`. A multi-day gigabyte allowance cannot be installed as a NXTL rule. `notes.cap_per_line_usd` is a USD figure.
 - There is no per-line top-up and no DELETE eSIM. `POST /topup` credits the partner pool from prepaid budget. Terminate is permanent.
 - Public destination region rows do not list member countries, so region search does not expand to ISO codes.
