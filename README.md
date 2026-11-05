@@ -1,13 +1,16 @@
 # NXTL eSIM SDKs
 
+[![npm](https://img.shields.io/npm/v/@nxtlsim/esim-sdk)](https://www.npmjs.com/package/@nxtlsim/esim-sdk)
+[![PyPI](https://img.shields.io/pypi/v/nxtl-esim)](https://pypi.org/project/nxtl-esim/)
+
 Official JavaScript/TypeScript and Python SDKs for the [NXTL eSIM](https://nxtlsim.com) B2B REST API. Issue, resell, and manage pay-as-you-go travel eSIMs against a pooled business balance.
 
 API access belongs to an approved business account. Create the account and an API key at [NXTL for Business](https://nxtlsim.com/for-business/). The human reference is the [NXTL eSIM API documentation](https://nxtlsim.com/nxtl-api-reference/). The machine contract checked into `spec/nxtl-v1-openapi.json` is OpenAPI 2.6.3 (48 operations) from `https://nxtlsim.com/wp-content/plugins/nxtl-data-esim-v2/docs/nxtl-v1-openapi.json`.
 
 | Package | Path | Install |
 | --- | --- | --- |
-| `@nxtlsim/esim-sdk` | [`js/`](js/README.md) | `npm install @nxtlsim/esim-sdk` |
-| `nxtl-esim` | [`python/`](python/README.md) | `pip install nxtl-esim` |
+| [`@nxtlsim/esim-sdk`](https://www.npmjs.com/package/@nxtlsim/esim-sdk) | [`js/`](js/README.md) | `npm install @nxtlsim/esim-sdk@0.1.0` |
+| [`nxtl-esim`](https://pypi.org/project/nxtl-esim/) | [`python/`](python/README.md) | `pip install nxtl-esim==0.1.0` |
 
 Base URL: `https://nxtlsim.com/api/v1`. Authenticate with the `X-NXTL-Key` header. `GET /health` is public. The product model on the API is pay-as-you-go data: issue a profile, fund the pool from the partner prepaid budget, and reconcile usage.
 
