@@ -226,6 +226,8 @@ class AsyncNxtlClient(AsyncEndpointMixin):
             yield item
 
     async def iterate_usage_cdrs(self, **query: Any) -> AsyncIterator[JsonObject]:
+        if query.get("after_id") is not None:
+            raise TypeError("after_id uses iterate_accounting_cdrs, not page iteration")
         per_page = int(query.pop("per_page", 100) or 100)
         max_pages = int(query.pop("max_pages", 100))
         options = query.pop("options", None)
@@ -236,6 +238,29 @@ class AsyncNxtlClient(AsyncEndpointMixin):
             max_pages=max_pages,
         ):
             yield item
+
+    async def iterate_accounting_cdrs(self, **query: Any) -> AsyncIterator[JsonObject]:
+        """after_id cursor with accounting=1. page is always 1. pages/total are ignored."""
+        after = int(query.pop("after_id", 0) or 0)
+        per_page = int(query.pop("per_page", 100) or 100)
+        options = query.pop("options", None)
+        query.pop("max_pages", None)
+        seen: set[int] = set()
+        while True:
+            payload = (await self.usage_cdrs(after_id=after, accounting=1, page=1, per_page=per_page, options=options, **query)).data
+            rows = payload.get("cdrs") if isinstance(payload, dict) else None
+            if not rows:
+                return
+            last = rows[-1].get("id") if isinstance(rows[-1], dict) else None
+            if not isinstance(last, int) or last <= after:
+                return
+            for row in rows:
+                yield row
+            nxt = payload.get("next_cursor") if isinstance(payload, dict) else None
+            if not isinstance(nxt, int) or nxt <= after or nxt in seen:
+                return
+            seen.add(nxt)
+            after = nxt
 
     async def iterate_webhook_deliveries(self, **query: Any) -> AsyncIterator[JsonObject]:
         max_pages = int(query.pop("max_pages", 100))

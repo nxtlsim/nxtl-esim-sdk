@@ -1,7 +1,7 @@
 import type { OperationDescriptor } from "./types.js";
 
 /**
- * The 48 operations in OpenAPI 2.6.2. Paths are relative to `/api/v1`.
+ * The 48 operations in OpenAPI 2.6.3. Paths are relative to `/api/v1`.
  * `autoIdempotency` is set only where the document declares an Idempotency-Key parameter.
  */
 export const API_OPERATIONS: readonly OperationDescriptor[] = [

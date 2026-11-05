@@ -109,12 +109,15 @@ export class CustomerDirectory {
     const lines = await this.store.listAssignments({ customerId, activeOnly: true });
     const rows = [];
     const notes: string[] = [];
+    let volumeComplete = lines.length > 0;
     for (const line of lines) {
       const report = await loadUsageDetails(this.client, { ...options, period, iccid: line.iccid });
       rows.push(...report.rows);
       notes.push(...report.notes);
+      if (!report.volumeComplete) volumeComplete = false;
     }
     const combined = buildUsageReport(rows, period, options);
+    combined.volumeComplete = volumeComplete;
     combined.notes.push(...notes);
     return combined;
   }

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NXTL B2B API",
-    "version": "2.6.2",
+    "version": "2.6.3",
     "description": "Partner REST API. Authenticate every request with `X-NXTL-Key: <secret>` (the value returned once when the key is created). Send `Idempotency-Key` (or legacy `X-NXTL-Idempotency-Key`) on every POST that creates a resource \u2014 replays return the original outcome plus `Idempotent-Replayed: true`. Errors come back in a uniform envelope (`type`, `code`, `message`, `request_id`, `doc_url`). Webhook bodies are signed with HMAC-SHA256 \u2014 verify using the timestamped `X-NXTL-Signature-V1: t=<unix>,v1=<hex>` header.",
     "contact": {
       "name": "NXTL Support",
@@ -852,7 +852,7 @@
           "Usage"
         ],
         "summary": "Itemised usage ledger rows",
-        "description": "Scope usage:read or balance:read. One object per ledger row with entry_type usage. Envelope is { cdrs, total, page, pages }. id is the ledger row id (stable integer). amount_usd and amount_eur are signed JSON numbers copied from the ledger, so a usage debit is negative. currency is the ledger currency string. customer_total_after is the balance after that row, or null. created_at is the ledger datetime string, not the supplier session time. bytes, mb, country, operator, rat, mcc, mnc and tadig are always present. On the current serializer they are empty (bytes 0, text fields empty) because the usage-detail join only runs when entry_type is already on the selected row, and this query does not select entry_type. Country and volume for the same event are on GET /esims/{iccid}/usage and on usage.recorded. There is no amount field and no idempotency_key on this response. For current EUR usage, amount_usd is 0 and amount_eur is the negative retail EUR charge. Zero amount_usd does not mean the usage was free.",
+        "description": "Scope usage:read or balance:read. One object per ledger row with entry_type usage. Envelope is { cdrs, total, page, pages }. id is the ledger row id (stable integer). amount_usd and amount_eur are signed JSON numbers copied from the ledger, so a usage debit is negative. currency is the ledger currency string. customer_total_after is the balance after that row, or null. created_at is the ledger datetime string, not the supplier session time. bytes, mb, country, operator, rat, mcc, mnc and tadig are always present. Without accounting=1 they stay empty (bytes 0, text fields empty) so existing clients keep the legacy payload. With accounting=1 the same idempotency-key join used by per-line usage fills them, adds detail_available, and adds ledger_id equal to id. One ledger row stays one CDR. after_id is an optional exclusive cursor ordered by id ascending; omit it to keep page/offset ordered by id descending. There is no amount field and no idempotency_key on this response. For current EUR usage, amount_usd is 0 and amount_eur is the negative retail EUR charge. Zero amount_usd does not mean the usage was free.",
         "parameters": [
           {
             "name": "iccid",
@@ -1468,7 +1468,9 @@
             "enum": [
               "balance_below",
               "line_usage_pct",
-              "line_usage_usd_today"
+              "line_usage_usd_today",
+              "line_usage_pct_eur",
+              "line_usage_eur_today"
             ]
           },
           "operator": {
@@ -1511,6 +1513,10 @@
               "cap_per_line_usd": {
                 "type": "number",
                 "description": "USD money cap used only by line_usage_pct. Not gigabytes. Optional notes.cap_per_line_currency is converted to USD before storage and is not kept as a separate public field."
+              },
+              "cap_per_line_eur": {
+                "type": "number",
+                "description": "EUR money cap used only by line_usage_pct_eur. Not gigabytes and not converted from USD. Existing USD rules do not read this field."
               },
               "min_renotify_seconds": {
                 "type": "integer"

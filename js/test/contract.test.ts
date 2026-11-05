@@ -79,8 +79,8 @@ describe("OpenAPI 2.6.2 usage contract", () => {
     assert.equal(hook.consumptionCharge, 0.42);
   });
 
-  it("pages per-line usage, keeps CDR charges separate, and does not double-bill", async () => {
-    let usagePage = 0;
+  it("requests accounting CDRs, keeps one charge, and does not double-bill", async () => {
+    const queries: string[] = [];
     const bodies: Array<{ method: string; path: string; body?: unknown }> = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = new URL(String(input));
@@ -89,32 +89,27 @@ describe("OpenAPI 2.6.2 usage contract", () => {
       if (typeof init?.body === "string" && init.body) body = JSON.parse(init.body);
       bodies.push({ method, path: url.pathname, ...(body !== undefined ? { body } : {}) });
       if (url.pathname.endsWith("/usage/cdrs")) {
+        queries.push(url.search);
+        const after = Number(url.searchParams.get("after_id") ?? "0");
+        const row = after >= 1001 ? [] : [{
+          id: 1001,
+          ledger_id: 1001,
+          iccid: ICCID,
+          currency: "EUR",
+          amount_usd: 0,
+          amount_eur: -0.42,
+          created_at: "2026-07-31 12:00:05",
+          bytes: 1048576,
+          country: "Germany",
+          detail_available: true,
+        }];
         return new Response(JSON.stringify({
-          cdrs: [{
-            id: 1001,
-            iccid: ICCID,
-            currency: "EUR",
-            amount_usd: 0,
-            amount_eur: -0.42,
-            created_at: "2026-07-31 12:00:05",
-            bytes: 0,
-            country: "",
-          }],
-          total: 1,
+          cdrs: row,
+          total: row.length,
           page: 1,
           pages: 1,
+          next_cursor: null,
         }), { status: 200 });
-      }
-      if (url.pathname.endsWith("/usage")) {
-        usagePage += 1;
-        const page = Number(url.searchParams.get("page") ?? "1");
-        const usage = page === 1
-          ? [
-              { entry_type: "usage", currency: "EUR", amount_usd: 0, amount_eur: -0.42, created_at: "2026-07-31 12:00:05", bytes: 1048576, country: "Germany" },
-              ...Array.from({ length: 49 }, () => ({ entry_type: "adjustment", currency: "EUR", amount_usd: 0, amount_eur: 0, created_at: "2026-07-31 12:00:06" })),
-            ]
-          : [{ entry_type: "adjustment", currency: "EUR", amount_usd: 0, amount_eur: 1, created_at: "2026-07-31 13:00:00", note: "credit" }];
-        return new Response(JSON.stringify({ iccid: ICCID, provider: "ocs", page, usage }), { status: 200 });
       }
       if (method === "POST" && url.pathname.endsWith("/suspend")) return new Response("{}", { status: 200 });
       if (method === "POST" && url.pathname.endsWith("/resume")) return new Response("{}", { status: 200 });
@@ -130,7 +125,9 @@ describe("OpenAPI 2.6.2 usage contract", () => {
       markup: { percentage: 0, rounding: "nearest", currency: "EUR" },
       retailCurrency: "EUR",
     });
-    assert.equal(usagePage, 2);
+    assert.match(queries[0] ?? "", /accounting=1/);
+    assert.match(queries[0] ?? "", /after_id=0/);
+    assert.match(queries[0] ?? "", /page=1/);
     assert.equal(report.totals.wholesaleEur, 0.42);
     assert.equal(report.totals.bytes, 1048576);
     assert.equal(report.volumeComplete, true);

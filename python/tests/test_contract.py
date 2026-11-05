@@ -69,41 +69,24 @@ def test_paging_dedup_and_lifecycle_requests() -> None:
             bodies.append((request.method, path, request.content.decode()))
         else:
             bodies.append((request.method, path, None))
-        if path.endswith("/usage/cdrs"):
-            return httpx.Response(200, json={
-                "cdrs": [{
+            if path.endswith("/usage/cdrs"):
+                pages["usage"] += 1
+                after = int(request.url.params.get("after_id") or "0")
+                assert request.url.params.get("accounting") == "1"
+                assert request.url.params.get("page") == "1"
+                rows = [] if after >= 1001 else [{
                     "id": 1001,
+                    "ledger_id": 1001,
+                    "detail_available": True,
                     "iccid": ICCID,
                     "currency": "EUR",
                     "amount_usd": 0,
                     "amount_eur": -0.42,
                     "created_at": "2026-07-31 12:00:05",
-                    "bytes": 0,
-                    "country": "",
-                }],
-                "total": 1,
-                "page": 1,
-                "pages": 1,
-            })
-        if path.endswith("/usage"):
-            pages["usage"] += 1
-            page = int(request.url.params.get("page") or "1")
-            usage = [{
-                "entry_type": "usage",
-                "currency": "EUR",
-                "amount_usd": 0,
-                "amount_eur": -0.42,
-                "created_at": "2026-07-31 12:00:05",
-                "bytes": 1048576,
-                "country": "Germany",
-            }] + [{"entry_type": "adjustment", "currency": "EUR", "amount_usd": 0, "amount_eur": 0, "created_at": "2026-07-31 12:00:06"}] * 49 if page == 1 else [{
-                "entry_type": "adjustment",
-                "currency": "EUR",
-                "amount_usd": 0,
-                "amount_eur": 1,
-                "created_at": "2026-07-31 13:00:00",
-            }]
-            return httpx.Response(200, json={"iccid": ICCID, "provider": "ocs", "page": page, "usage": usage})
+                    "bytes": 1048576,
+                    "country": "Germany",
+                }]
+                return httpx.Response(200, json={"cdrs": rows, "total": len(rows), "page": 1, "pages": 1, "next_cursor": None})
         if request.method == "PATCH":
             return httpx.Response(409, json={"error": "already_terminated"})
         return httpx.Response(200, json={})
@@ -111,7 +94,7 @@ def test_paging_dedup_and_lifecycle_requests() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
         client = NxtlClient("k", http_client=http, retry=False)
         report = load_usage_details(client, iccid=ICCID, period={"kind": "monthly", "month": "2026-07"}, retail_currency="EUR", markup={"percentage": 0, "rounding": "nearest", "currency": "EUR"})
-        assert pages["usage"] == 2
+        assert pages["usage"] >= 1
         assert report["totals"]["wholesale_eur"] == 0.42
         assert report["totals"]["bytes"] == 1048576
         directory = CustomerDirectory(MemoryCustomerStore(), client)

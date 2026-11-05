@@ -325,13 +325,16 @@ class EndpointMixin:
         options: Mapping[str, Any] | None = None,
         *,
         page: int | None = None,
+        accounting: int | None = None,
+        after_id: int | None = None,
     ) -> ApiResponse[JsonObject]:
         """GET /esims/{iccid}/usage — Per-line ledger rows. Page size is fixed at 50."""
         iccid = validate_iccid(iccid)
+        sent_page = 1 if after_id is not None else page
         return self._request(
             'GET',
             f"/esims/{encode_path(iccid)}/usage",
-            query={"page": page} if page else None,
+            query=omit_none({"page": sent_page, "accounting": accounting, "after_id": after_id}) or None,
             options=options,
         )
 
@@ -339,12 +342,18 @@ class EndpointMixin:
         self,
         iccid: str,
         options: Mapping[str, Any] | None = None,
+        *,
+        accounting: int | None = None,
+        after_id: int | None = None,
+        page: int | None = None,
     ) -> ApiResponse[JsonObject]:
-        """GET /esims/{iccid}/events — Per-line ledger events."""
+        """GET /esims/{iccid}/events — Per-line ledger events. accounting=1 adds ledger_id."""
         iccid = validate_iccid(iccid)
+        sent_page = 1 if after_id is not None else page
         return self._request(
             'GET',
             f"/esims/{encode_path(iccid)}/events",
+            query=omit_none({"page": sent_page, "accounting": accounting, "after_id": after_id}) or None,
             options=options,
         )
 
@@ -554,10 +563,18 @@ class EndpointMixin:
         page: int | None = None,
         per_page: int | None = None,
         options: Mapping[str, Any] | None = None,
+        *,
+        accounting: int | None = None,
+        after_id: int | None = None,
     ) -> ApiResponse[JsonObject]:
-        """GET /usage/cdrs — Itemised usage events."""
-        validate_page(page, per_page, 500)
-        query = omit_none({'iccid': iccid, 'since': since, 'until': until, 'page': page, 'per_page': per_page})
+        """GET /usage/cdrs — Itemised usage events. after_id selects cursor mode and forces page 1."""
+        if after_id is None:
+            validate_page(page, per_page, 500)
+        else:
+            page = 1
+            if per_page is not None:
+                validate_page(1, per_page, 500)
+        query = omit_none({'iccid': iccid, 'since': since, 'until': until, 'page': page, 'per_page': per_page, 'accounting': accounting, 'after_id': after_id})
         return self._request(
             'GET',
             '/usage/cdrs',
@@ -1018,13 +1035,16 @@ class AsyncEndpointMixin:
         options: Mapping[str, Any] | None = None,
         *,
         page: int | None = None,
+        accounting: int | None = None,
+        after_id: int | None = None,
     ) -> ApiResponse[JsonObject]:
         """GET /esims/{iccid}/usage — Per-line ledger rows. Page size is fixed at 50."""
         iccid = validate_iccid(iccid)
+        sent_page = 1 if after_id is not None else page
         return await self._request(
             'GET',
             f"/esims/{encode_path(iccid)}/usage",
-            query={"page": page} if page else None,
+            query=omit_none({"page": sent_page, "accounting": accounting, "after_id": after_id}) or None,
             options=options,
         )
 
@@ -1032,12 +1052,18 @@ class AsyncEndpointMixin:
         self,
         iccid: str,
         options: Mapping[str, Any] | None = None,
+        *,
+        accounting: int | None = None,
+        after_id: int | None = None,
+        page: int | None = None,
     ) -> ApiResponse[JsonObject]:
-        """GET /esims/{iccid}/events — Per-line ledger events."""
+        """GET /esims/{iccid}/events — Per-line ledger events. accounting=1 adds ledger_id."""
         iccid = validate_iccid(iccid)
+        sent_page = 1 if after_id is not None else page
         return await self._request(
             'GET',
             f"/esims/{encode_path(iccid)}/events",
+            query=omit_none({"page": sent_page, "accounting": accounting, "after_id": after_id}) or None,
             options=options,
         )
 
@@ -1247,10 +1273,18 @@ class AsyncEndpointMixin:
         page: int | None = None,
         per_page: int | None = None,
         options: Mapping[str, Any] | None = None,
+        *,
+        accounting: int | None = None,
+        after_id: int | None = None,
     ) -> ApiResponse[JsonObject]:
-        """GET /usage/cdrs — Itemised usage events."""
-        validate_page(page, per_page, 500)
-        query = omit_none({'iccid': iccid, 'since': since, 'until': until, 'page': page, 'per_page': per_page})
+        """GET /usage/cdrs — Itemised usage events. after_id selects cursor mode and forces page 1."""
+        if after_id is None:
+            validate_page(page, per_page, 500)
+        else:
+            page = 1
+            if per_page is not None:
+                validate_page(1, per_page, 500)
+        query = omit_none({'iccid': iccid, 'since': since, 'until': until, 'page': page, 'per_page': per_page, 'accounting': accounting, 'after_id': after_id})
         return await self._request(
             'GET',
             '/usage/cdrs',

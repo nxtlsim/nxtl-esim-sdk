@@ -2,7 +2,7 @@
 
 Python SDK for the [NXTL eSIM](https://nxtlsim.com) B2B API. Issue and manage pay-as-you-go travel eSIMs, read the pooled balance, and verify signed webhooks.
 
-Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.2** (48 operations) at `https://nxtlsim.com/api/v1`.
+Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.3** (48 operations) at `https://nxtlsim.com/api/v1`.
 
 ```bash
 pip install nxtl-esim
@@ -257,7 +257,7 @@ Customer records, packages, wallets, and customer invoices live in your process.
 
 Reconciled cost uses the native field selected by `currency`. Current usage is EUR: `amount_eur` is a signed retail pool debit and `amount_usd` is `0`. That zero is not an FX conversion and is not free usage. The positive value is the NXTL API charge (reseller acquisition cost), not upstream wholesale. Markup sits on top of it. The public per-GB feed is only for `quote_trip`, not for reconciled charges.
 
-`GET /usage/cdrs` is `{ cdrs, total, page, pages }`. Its bytes and country text are placeholders and are not used for allowances. `GET /esims/{iccid}/usage` is `{ iccid, provider, page, usage }` with 50 rows per page and no date filter. Only `entry_type="usage"` has octets and a country name. `GET /usage/esims` uses the array key `lines`, and the money fields are JSON strings (`parse_rollup_number`). CDR charges and per-line volume are separate streams. Ledger ids are not matched to webhook event ids. `commit_sync` stores dedup keys with the wallet write. A failed volume walk is incomplete, not zero usage.
+Reseller sync requests `accounting=1`. Without it, CDR bytes and network text stay empty and are not measured zero. `detail_available` false stays pending. True with `bytes` 0 is measured zero. `after_id` is an ascending cursor (`id > after_id`, `page` 1, `next_cursor` or null). Checkpoints are per account, ICCID, and date window, and they move only after the commit. `sync_reseller_async` uses that same commit path. A webhook without `data.ledger_id` is not charged. Markup and FX apply to the selling charge. Missing FX stays unresolved. Credits are the acquisition amount with no markup. JSON replacement is atomic and single-process. SQL `commit_sync` requires a transaction. `Germany` maps to `DE`. A manual pause is not resumed. `POST /esims` 202 is not completed provisioning.
 
 ### Customers
 

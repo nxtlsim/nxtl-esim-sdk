@@ -35,7 +35,8 @@ def period_bounds(period: Mapping[str, str]) -> dict[str, str]:
     return {"since": period["since"], "until": period["until"]}
 
 
-def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual") -> dict[str, Any]:
+def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual", context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    from .countries import country_name_to_iso2
     from .ledger import api_charge, parse_utc_timestamp, webhook_charge
 
     used = [source]
@@ -53,8 +54,14 @@ def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual") -> dict[
         "charge_kind": money["kind"],
         "consumption_charge": money["consumption_charge"],
     }
-    if source == "cdr" and isinstance(raw.get("id"), int):
-        row["ledger_id"] = raw["id"]
+    if source == "cdr":
+        ledger = raw.get("ledger_id") if isinstance(raw.get("ledger_id"), int) else raw.get("id")
+        if isinstance(ledger, int):
+            row["ledger_id"] = ledger
+    elif isinstance(raw.get("ledger_id"), int):
+        row["ledger_id"] = raw["ledger_id"]
+    if isinstance(raw.get("detail_available"), bool):
+        row["detail_available"] = raw["detail_available"]
     if source == "webhook" and isinstance(raw.get("id"), str):
         row["event_id"] = raw["id"]
     if entry_type:
@@ -62,6 +69,8 @@ def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual") -> dict[
     iccid = _string(raw, ("iccid",), used)
     if iccid:
         row["iccid"] = iccid
+    elif context and context.get("iccid"):
+        row["iccid"] = context["iccid"]
     if at_raw:
         row["at"] = parse_utc_timestamp(at_raw)
     if amount_usd is not None:
@@ -70,7 +79,9 @@ def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual") -> dict[
         row["amount_eur"] = amount_eur
     if currency or money["currency"]:
         row["currency"] = currency or money["currency"]
-    trust = source == "manual" or (source == "line_usage" and entry_type == "usage") or (source == "webhook" and (_number(raw, ("bytes",), used) or 0) > 0)
+    trust = source == "manual" or (source == "line_usage" and entry_type == "usage") or (source == "cdr" and row.get("detail_available") is True) or (source == "webhook" and (_number(raw, ("bytes",), used) or 0) > 0)
+    if source == "cdr" and row.get("detail_available") is not True:
+        trust = False
     if trust:
         num_bytes = _number(raw, ("bytes",), used) if source in {"line_usage", "webhook"} else _bytes(raw, used)
         if num_bytes is not None and not (source == "webhook" and num_bytes == 0):
@@ -80,6 +91,9 @@ def normalize_usage_row(raw: Mapping[str, Any], source: str = "manual") -> dict[
         country = _string(raw, country_keys, used)
         if country and country.strip():
             row["country"] = country.strip().upper() if source == "manual" and len(country.strip()) == 2 else country.strip()
+            iso = country_name_to_iso2(str(row["country"]))
+            if iso:
+                row["country_iso2"] = iso
     network = _string(raw, ("network", "operator"), used)
     if network and source != "cdr":
         row["network"] = network
@@ -171,25 +185,19 @@ def build_usage_report(rows: Iterable[Mapping[str, Any]], period: Mapping[str, s
 def load_usage_details(client: Any, *, period: Mapping[str, str], iccid: str | None = None, include_partner_rollups: bool = False, **options: Any) -> dict[str, Any]:
     bounds = period_bounds(period)
     notes: list[str] = []
-    query: dict[str, Any] = {"since": bounds["since"], "until": bounds["until"], "per_page": 100}
+    query: dict[str, Any] = {"since": bounds["since"], "until": bounds["until"], "per_page": 100, "after_id": 0}
     if iccid:
         query["iccid"] = iccid
-    cdrs = [normalize_usage_row(row, "cdr") for row in client.iterate_usage_cdrs(**query)]
-    line_rows: list[dict[str, Any]] = []
-    volume_complete = True
-    if iccid:
-        try:
-            for row in _iter_line_usage(client, iccid):
-                line_rows.append(normalize_usage_row(row, "line_usage"))
-        except Exception as exc:  # noqa: BLE001
-            volume_complete = False
-            notes.append(str(exc))
-        notes.append("GET /esims/{iccid}/usage has no since/until parameter. Page size is 50. Only entry_type usage supplies bytes and country. CDR placeholders are not used as volume.")
-    else:
-        volume_complete = False
-        notes.append("No ICCID was requested, so per-line volume was not collected. CDR bytes are not measured consumption.")
-    report = build_usage_report([*cdrs, *line_rows], period, options)
-    report["volume_complete"] = volume_complete and bool(iccid)
+    cdrs = [normalize_usage_row(row, "cdr", {"iccid": iccid} if iccid else None) for row in client.iterate_accounting_cdrs(**query)]
+    unavailable = any(row.get("detail_available") is None for row in cdrs)
+    pending = any(row.get("detail_available") is False for row in cdrs)
+    if unavailable:
+        notes.append("accounting=1 was requested but detail_available was absent. Volume is unavailable and is not treated as measured zero.")
+    if pending:
+        notes.append("Some accounting CDRs have detail_available false. Charges can post while volume stays pending.")
+    notes.append("Accounting CDRs are the charge and volume source. Per-line rows are not added, so one ledger id is not consumed twice.")
+    report = build_usage_report(cdrs, period, options)
+    report["volume_complete"] = not unavailable and not pending
     report["notes"].extend(notes)
     if include_partner_rollups:
         seconds = _parse(bounds["until"]) - _parse(bounds["since"])
@@ -214,19 +222,19 @@ async def load_usage_details_async(client: Any, **kwargs: Any) -> dict[str, Any]
     include = kwargs.pop("include_partner_rollups", False)
     bounds = period_bounds(period)
     notes: list[str] = []
-    query: dict[str, Any] = {"since": bounds["since"], "until": bounds["until"], "per_page": 100}
+    query: dict[str, Any] = {"since": bounds["since"], "until": bounds["until"], "per_page": 100, "after_id": 0}
     if iccid:
         query["iccid"] = iccid
     cdrs = []
-    async for row in client.iterate_usage_cdrs(**query):
-        cdrs.append(normalize_usage_row(row))
-    line_rows: list[dict[str, Any]] = []
-    if iccid:
-        payload = (await client.get_esim_usage(iccid)).data
-        line_rows = [normalize_usage_row(row) for row in _extract_rows(payload)]
-        notes.append("GET /esims/{iccid}/usage has no time filters in the spec. Rows with a timestamp are filtered to the period locally.")
-    rows = cdrs or line_rows
-    report = build_usage_report(rows, period, kwargs)
+    async for row in client.iterate_accounting_cdrs(**query):
+        cdrs.append(normalize_usage_row(row, "cdr", {"iccid": iccid} if iccid else None))
+    unavailable = any(row.get("detail_available") is None for row in cdrs)
+    pending = any(row.get("detail_available") is False for row in cdrs)
+    if unavailable:
+        notes.append("accounting=1 was requested but detail_available was absent. Volume is unavailable and is not treated as measured zero.")
+    notes.append("Accounting CDRs are the charge and volume source. Per-line rows are not added, so one ledger id is not consumed twice.")
+    report = build_usage_report(cdrs, period, kwargs)
+    report["volume_complete"] = not unavailable and not pending
     report["notes"].extend(notes)
     if include:
         seconds = _parse(bounds["until"]) - _parse(bounds["since"])

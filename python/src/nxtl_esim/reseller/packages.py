@@ -167,19 +167,43 @@ def sync_package_threshold(client: Any, package: Mapping[str, Any]) -> dict[str,
     return {"created": True}
 
 
-def suspend_overage_lines(client: Any, allocations: Iterable[Mapping[str, Any]], packages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def suspend_overage_lines(client: Any, allocations: Iterable[Mapping[str, Any]], packages: Iterable[Mapping[str, Any]], manual_pause: set[str] | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
     by_id = {item["id"]: item for item in packages}
+    current = now or datetime.now(timezone.utc)
+    rows = list(allocations)
+    paused = manual_pause or set()
     results = []
-    for allocation in allocations:
+    seen: set[str] = set()
+    for allocation in rows:
         package = by_id.get(allocation["package_id"])
-        if not package or package.get("overage") != "suspend" or allocation.get("status") != "overage" or not allocation.get("iccid"):
+        iccid = allocation.get("iccid")
+        if not package or package.get("overage") != "suspend" or not iccid or iccid in paused:
             continue
+        if allocation.get("status") not in {"overage", "exhausted", "expired"}:
+            continue
+        if _alternate(allocation, rows, by_id, current):
+            continue
+        if iccid in seen:
+            continue
+        seen.add(str(iccid))
         try:
-            client.suspend_esim(allocation["iccid"])
-            results.append({"iccid": allocation["iccid"], "ok": True})
+            client.suspend_esim(iccid)
+            results.append({"iccid": iccid, "ok": True})
         except Exception as exc:  # noqa: BLE001 - per-line result, not a crash
-            results.append({"iccid": allocation["iccid"], "ok": False, "error": str(exc)})
+            results.append({"iccid": iccid, "ok": False, "error": str(exc)})
     return results
+
+
+def _alternate(current: Mapping[str, Any], allocations: list[Mapping[str, Any]], packages: Mapping[str, Mapping[str, Any]], now: datetime) -> bool:
+    for other in allocations:
+        if other.get("id") == current.get("id") or other.get("iccid") != current.get("iccid"):
+            continue
+        package = packages.get(str(other.get("package_id")))
+        if not package or _parse(str(other["expires_at"])) <= now or other.get("status") == "expired":
+            continue
+        if float(other.get("consumed_bytes") or 0) < _cap(other, package):
+            return True
+    return False
 
 
 def _cap(allocation: Mapping[str, Any], package: Mapping[str, Any]) -> float:
@@ -195,9 +219,10 @@ def _matches(allocation: Mapping[str, Any], package: Mapping[str, Any], row: Map
     countries = package.get("countries") or []
     if not countries:
         return True
-    if not row.get("country"):
-        return False
-    return str(row["country"]).upper() in countries
+    code = row.get("country_iso2")
+    if not code and isinstance(row.get("country"), str) and len(row["country"]) == 2:
+        code = str(row["country"]).upper()
+    return bool(code) and str(code).upper() in countries
 
 
 def _accepts(allocation: Mapping[str, Any], package: Mapping[str, Any], row: Mapping[str, Any], now: datetime) -> bool:

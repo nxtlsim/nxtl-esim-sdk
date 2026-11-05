@@ -114,13 +114,39 @@ export interface AssignmentFilter {
 }
 
 export interface AppliedKey {
-  stream: "cdr" | "line_usage" | "webhook";
+  stream: "financial" | "volume" | "cdr" | "line_usage" | "webhook";
   key: string;
+}
+
+export interface SyncCheckpoint {
+  scope: string;
+  afterId: number;
+}
+
+export interface PendingDetail {
+  scope: string;
+  ledgerId: number;
+  iccid: string;
+  createdAt?: string;
+}
+
+export interface FailedAction {
+  id: string;
+  iccid: string;
+  kind: "suspend";
+  error: string;
+  at: string;
 }
 
 export interface SyncCommit {
   wallet?: WalletEntry[];
   applied?: AppliedKey[];
+  allocations?: PackageAllocation[];
+  checkpoints?: SyncCheckpoint[];
+  pending?: PendingDetail[];
+  clearPending?: Array<{ scope: string; ledgerId: number }>;
+  failedActions?: FailedAction[];
+  clearFailed?: string[];
 }
 
 export interface CustomerStore {
@@ -141,7 +167,15 @@ export interface CustomerStore {
   putInvoice(invoice: StoredInvoice): Promise<void>;
   listInvoices(filter?: { customerId?: string }): Promise<StoredInvoice[]>;
   hasApplied(stream: AppliedKey["stream"], key: string): Promise<boolean>;
-  /** Writes wallet rows and dedup keys together. JSON file store persists once. */
+  getCheckpoint(scope: string): Promise<number>;
+  listPending(scope: string): Promise<PendingDetail[]>;
+  listFailedActions(): Promise<FailedAction[]>;
+  /**
+   * Writes wallet rows, package allocations, dedup keys, and checkpoints together.
+   * The JSON file store replaces the file atomically and is single-process:
+   * two processes can overwrite each other. SQL refuses this call without a
+   * transaction callback.
+   */
   commitSync(commit: SyncCommit): Promise<void>;
 }
 
@@ -154,10 +188,13 @@ interface MemoryDb {
   snapshots: UsageSnapshot[];
   invoices: StoredInvoice[];
   applied: AppliedKey[];
+  checkpoints: SyncCheckpoint[];
+  pending: PendingDetail[];
+  failedActions: FailedAction[];
 }
 
 export class MemoryCustomerStore implements CustomerStore {
-  private readonly db: MemoryDb = {
+  protected db: MemoryDb = {
     customers: [],
     assignments: [],
     wallet: [],
@@ -166,6 +203,9 @@ export class MemoryCustomerStore implements CustomerStore {
     snapshots: [],
     invoices: [],
     applied: [],
+    checkpoints: [],
+    pending: [],
+    failedActions: [],
   };
 
   async putCustomer(customer: Customer): Promise<void> {
@@ -260,13 +300,22 @@ export class MemoryCustomerStore implements CustomerStore {
     return this.db.applied.some((item) => item.stream === stream && item.key === key);
   }
 
+  async getCheckpoint(scope: string): Promise<number> {
+    return this.db.checkpoints.find((item) => item.scope === scope)?.afterId ?? 0;
+  }
+
+  async listPending(scope: string): Promise<PendingDetail[]> {
+    return this.db.pending.filter((item) => item.scope === scope);
+  }
+
+  async listFailedActions(): Promise<FailedAction[]> {
+    return [...this.db.failedActions];
+  }
+
   async commitSync(commit: SyncCommit): Promise<void> {
-    for (const entry of commit.wallet ?? []) this.db.wallet.push(entry);
-    for (const key of commit.applied ?? []) {
-      if (!this.db.applied.some((item) => item.stream === key.stream && item.key === key.key)) {
-        this.db.applied.push(key);
-      }
-    }
+    const draft = structuredClone(this.db);
+    applyCommit(draft, commit);
+    this.db = draft;
   }
 }
 
@@ -308,6 +357,9 @@ export class JsonFileCustomerStore extends MemoryCustomerStore {
       snapshots: await this.listSnapshots(),
       invoices: await this.listInvoices(),
       applied: await super.listApplied(),
+      checkpoints: structuredClone(this.db.checkpoints),
+      pending: structuredClone(this.db.pending),
+      failedActions: structuredClone(this.db.failedActions),
     };
   }
 
@@ -319,7 +371,12 @@ export class JsonFileCustomerStore extends MemoryCustomerStore {
     for (const item of data.allocations ?? []) await super.putAllocation(item);
     for (const item of data.snapshots ?? []) await super.putSnapshot(item);
     for (const item of data.invoices ?? []) await super.putInvoice(item);
-    for (const item of data.applied ?? []) await super.commitSync({ applied: [item] });
+    await super.commitSync({
+      applied: data.applied ?? [],
+      checkpoints: data.checkpoints ?? [],
+      pending: data.pending ?? [],
+      failedActions: data.failedActions ?? [],
+    });
   }
 
   override async putCustomer(customer: Customer): Promise<void> {
@@ -415,10 +472,36 @@ export class JsonFileCustomerStore extends MemoryCustomerStore {
     return super.hasApplied(stream, key);
   }
 
+  override async getCheckpoint(scope: string): Promise<number> {
+    await this.load();
+    return super.getCheckpoint(scope);
+  }
+
+  override async listPending(scope: string): Promise<PendingDetail[]> {
+    await this.load();
+    return super.listPending(scope);
+  }
+
+  override async listFailedActions(): Promise<FailedAction[]> {
+    await this.load();
+    return super.listFailedActions();
+  }
+
   override async commitSync(commit: SyncCommit): Promise<void> {
     await this.load();
-    await super.commitSync(commit);
-    await this.persist();
+    const draft = structuredClone(this.db);
+    applyCommit(draft, commit);
+    const fs = await import("node:fs/promises");
+    const payload = JSON.stringify(shapeFrom(draft), null, 2);
+    const temporary = `${this.filePath}.${process.pid}.tmp`;
+    await fs.writeFile(temporary, payload, "utf8");
+    try {
+      await fs.rename(temporary, this.filePath);
+    } catch (error) {
+      await fs.rm(temporary, { force: true });
+      throw error;
+    }
+    this.db = draft;
   }
 }
 
@@ -431,6 +514,54 @@ interface MemoryShape {
   snapshots: UsageSnapshot[];
   invoices: StoredInvoice[];
   applied: AppliedKey[];
+  checkpoints: SyncCheckpoint[];
+  pending: PendingDetail[];
+  failedActions: FailedAction[];
+}
+
+function shapeFrom(db: MemoryDb): MemoryShape {
+  return {
+    customers: db.customers,
+    assignments: db.assignments,
+    wallet: db.wallet,
+    packages: db.packages,
+    allocations: db.allocations,
+    snapshots: db.snapshots,
+    invoices: db.invoices,
+    applied: db.applied,
+    checkpoints: db.checkpoints,
+    pending: db.pending,
+    failedActions: db.failedActions,
+  };
+}
+
+function applyCommit(db: MemoryDb, commit: SyncCommit): void {
+  for (const entry of commit.wallet ?? []) db.wallet.push(entry);
+  for (const allocation of commit.allocations ?? []) {
+    const index = db.allocations.findIndex((item) => item.id === allocation.id);
+    if (index >= 0) db.allocations[index] = allocation;
+    else db.allocations.push(allocation);
+  }
+  for (const key of commit.applied ?? []) {
+    if (!db.applied.some((item) => item.stream === key.stream && item.key === key.key)) db.applied.push(key);
+  }
+  for (const checkpoint of commit.checkpoints ?? []) {
+    const index = db.checkpoints.findIndex((item) => item.scope === checkpoint.scope);
+    if (index >= 0) db.checkpoints[index] = checkpoint;
+    else db.checkpoints.push(checkpoint);
+  }
+  for (const item of commit.clearPending ?? []) {
+    db.pending = db.pending.filter((row) => !(row.scope === item.scope && row.ledgerId === item.ledgerId));
+  }
+  for (const item of commit.pending ?? []) {
+    if (!db.pending.some((row) => row.scope === item.scope && row.ledgerId === item.ledgerId)) db.pending.push(item);
+  }
+  for (const id of commit.clearFailed ?? []) {
+    db.failedActions = db.failedActions.filter((item) => item.id !== id);
+  }
+  for (const action of commit.failedActions ?? []) {
+    if (!db.failedActions.some((item) => item.id === action.id)) db.failedActions.push(action);
+  }
 }
 
 /**
@@ -456,7 +587,8 @@ CREATE TABLE nxtl_reseller_lines (
   iccid TEXT NOT NULL,
   label TEXT,
   assigned_at TEXT NOT NULL,
-  unassigned_at TEXT
+  unassigned_at TEXT,
+  manual_pause INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE nxtl_reseller_wallet (
   id TEXT PRIMARY KEY,
@@ -492,13 +624,39 @@ CREATE TABLE nxtl_reseller_applied (
   dedup_key TEXT NOT NULL,
   PRIMARY KEY (stream, dedup_key)
 );
+CREATE TABLE nxtl_reseller_checkpoints (
+  scope TEXT PRIMARY KEY,
+  after_id INTEGER NOT NULL
+);
+CREATE TABLE nxtl_reseller_pending (
+  scope TEXT NOT NULL,
+  ledger_id INTEGER NOT NULL,
+  iccid TEXT NOT NULL,
+  created_at TEXT,
+  PRIMARY KEY (scope, ledger_id)
+);
+CREATE TABLE nxtl_reseller_failed_actions (
+  id TEXT PRIMARY KEY,
+  iccid TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  error TEXT NOT NULL,
+  at TEXT NOT NULL
+);
 `.trim();
+
+/** Add manual_pause on stores created before that column existed. */
+export const CUSTOMER_STORE_MIGRATIONS = [
+  "ALTER TABLE nxtl_reseller_lines ADD COLUMN manual_pause INTEGER NOT NULL DEFAULT 0",
+];
 
 export type SqlQuery = (sql: string, params?: readonly unknown[]) => Promise<Array<Record<string, unknown>>>;
 
 /** Example SQL adapter. It stores JSON documents for the nested records. */
 export class SqlCustomerStore implements CustomerStore {
-  constructor(private readonly query: SqlQuery) {}
+  constructor(
+    private readonly query: SqlQuery,
+    private readonly transaction?: <T>(fn: (query: SqlQuery) => Promise<T>) => Promise<T>,
+  ) {}
 
   async putCustomer(customer: Customer): Promise<void> {
     await this.query(
@@ -542,10 +700,10 @@ export class SqlCustomerStore implements CustomerStore {
 
   async putAssignment(assignment: LineAssignment): Promise<void> {
     await this.query(
-      `INSERT INTO nxtl_reseller_lines (id, customer_id, iccid, label, assigned_at, unassigned_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET unassigned_at=excluded.unassigned_at, label=excluded.label`,
-      [assignment.id, assignment.customerId, assignment.iccid, assignment.label ?? null, assignment.assignedAt, assignment.unassignedAt ?? null],
+      `INSERT INTO nxtl_reseller_lines (id, customer_id, iccid, label, assigned_at, unassigned_at, manual_pause)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET unassigned_at=excluded.unassigned_at, label=excluded.label, manual_pause=excluded.manual_pause`,
+      [assignment.id, assignment.customerId, assignment.iccid, assignment.label ?? null, assignment.assignedAt, assignment.unassignedAt ?? null, assignment.manualPause ? 1 : 0],
     );
   }
 
@@ -644,14 +802,89 @@ export class SqlCustomerStore implements CustomerStore {
     return rows.length > 0;
   }
 
+  async getCheckpoint(scope: string): Promise<number> {
+    const rows = await this.query("SELECT after_id FROM nxtl_reseller_checkpoints WHERE scope = ?", [scope]);
+    const value = rows[0]?.after_id;
+    return typeof value === "number" ? value : Number(value ?? 0);
+  }
+
+  async listPending(scope: string): Promise<PendingDetail[]> {
+    const rows = await this.query("SELECT * FROM nxtl_reseller_pending WHERE scope = ?", [scope]);
+    return rows.map((row) => {
+      const item: PendingDetail = { scope, ledgerId: Number(row.ledger_id), iccid: String(row.iccid) };
+      if (row.created_at) item.createdAt = String(row.created_at);
+      return item;
+    });
+  }
+
+  async listFailedActions(): Promise<FailedAction[]> {
+    const rows = await this.query("SELECT * FROM nxtl_reseller_failed_actions", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      iccid: String(row.iccid),
+      kind: "suspend" as const,
+      error: String(row.error),
+      at: String(row.at),
+    }));
+  }
+
   async commitSync(commit: SyncCommit): Promise<void> {
-    for (const entry of commit.wallet ?? []) await this.putWalletEntry(entry);
-    for (const item of commit.applied ?? []) {
-      await this.query(
-        "INSERT INTO nxtl_reseller_applied (stream, dedup_key) VALUES (?, ?) ON CONFLICT(stream, dedup_key) DO NOTHING",
-        [item.stream, item.key],
-      );
+    if (!this.transaction) {
+      throw new TypeError("SqlCustomerStore.commitSync requires a transaction callback. Separate writes are not atomic.");
     }
+    await this.transaction(async (query) => {
+      await applySqlCommit(query, commit);
+    });
+  }
+}
+
+async function applySqlCommit(query: SqlQuery, commit: SyncCommit): Promise<void> {
+  for (const entry of commit.wallet ?? []) {
+    await query(
+      `INSERT INTO nxtl_reseller_wallet (id, customer_id, at, kind, amount, currency, memo, reference)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [entry.id, entry.customerId, entry.at, entry.kind, entry.amount, entry.currency, entry.memo ?? null, entry.reference ?? null],
+    );
+  }
+  for (const allocation of commit.allocations ?? []) {
+    await query(
+      `INSERT INTO nxtl_reseller_allocations (id, document_json) VALUES (?, ?)
+       ON CONFLICT(id) DO UPDATE SET document_json=excluded.document_json`,
+      [allocation.id, JSON.stringify(allocation)],
+    );
+  }
+  for (const item of commit.applied ?? []) {
+    await query(
+      "INSERT INTO nxtl_reseller_applied (stream, dedup_key) VALUES (?, ?)",
+      [item.stream, item.key],
+    );
+  }
+  for (const checkpoint of commit.checkpoints ?? []) {
+    await query(
+      `INSERT INTO nxtl_reseller_checkpoints (scope, after_id) VALUES (?, ?)
+       ON CONFLICT(scope) DO UPDATE SET after_id=excluded.after_id`,
+      [checkpoint.scope, checkpoint.afterId],
+    );
+  }
+  for (const item of commit.clearPending ?? []) {
+    await query("DELETE FROM nxtl_reseller_pending WHERE scope = ? AND ledger_id = ?", [item.scope, item.ledgerId]);
+  }
+  for (const item of commit.pending ?? []) {
+    await query(
+      `INSERT INTO nxtl_reseller_pending (scope, ledger_id, iccid, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(scope, ledger_id) DO UPDATE SET iccid=excluded.iccid, created_at=excluded.created_at`,
+      [item.scope, item.ledgerId, item.iccid, item.createdAt ?? null],
+    );
+  }
+  for (const id of commit.clearFailed ?? []) {
+    await query("DELETE FROM nxtl_reseller_failed_actions WHERE id = ?", [id]);
+  }
+  for (const action of commit.failedActions ?? []) {
+    await query(
+      `INSERT INTO nxtl_reseller_failed_actions (id, iccid, kind, error, at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET error=excluded.error, at=excluded.at`,
+      [action.id, action.iccid, action.kind, action.error, action.at],
+    );
   }
 }
 
@@ -680,6 +913,7 @@ function assignmentFromRow(row: Record<string, unknown>): LineAssignment {
   };
   if (row.label) assignment.label = String(row.label);
   if (row.unassigned_at) assignment.unassignedAt = String(row.unassigned_at);
+  if (Number(row.manual_pause) === 1 || row.manual_pause === true) assignment.manualPause = true;
   return assignment;
 }
 

@@ -13,6 +13,7 @@ import type {
   BulkStatusRow,
   BulkTierBody,
   CallOptions,
+  CdrList,
   CdrQuery,
   DeliveryPage,
   DeliveryQuery,
@@ -222,9 +223,16 @@ export class NxtlClient {
   /**
    * GET /esims/{iccid}/usage.
    * Page size is fixed at 50. There is no since/until parameter and no pages count.
+   * `accounting: 1` adds `ledger_id`. `after_id` pages forward by that id.
    */
-  getEsimUsage(iccid: string, query?: { page?: number }, options?: CallOptions): Promise<ApiResponse<UsageList>> {
+  getEsimUsage(iccid: string, query?: { page?: number; accounting?: 0 | 1; after_id?: number }, options?: CallOptions): Promise<ApiResponse<UsageList>> {
     assertPage(query?.page, undefined);
+    if (query?.after_id !== undefined) {
+      return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/usage`, {
+        query: compactQuery({ ...query, page: 1 }),
+        options,
+      });
+    }
     return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/usage`, {
       query: compactQuery(query),
       options,
@@ -240,9 +248,15 @@ export class NxtlClient {
     );
   }
 
-  /** GET /esims/{iccid}/events. */
-  getEsimEvents(iccid: string, options?: CallOptions): Promise<ApiResponse<EventList>> {
-    return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/events`, { options });
+  /**
+   * GET /esims/{iccid}/events.
+   * `accounting: 1` adds `ledger_id`. The reference does not publish a page size.
+   */
+  getEsimEvents(iccid: string, query?: { accounting?: 0 | 1; after_id?: number; page?: number }, options?: CallOptions): Promise<ApiResponse<EventList>> {
+    return this.call("GET", `/esims/${encodePath(assertIccid(iccid))}/events`, {
+      query: compactQuery(query?.after_id !== undefined ? { ...query, page: 1 } : query),
+      options,
+    });
   }
 
   /** POST /esims/bulk-status — up to 100 ICCIDs. */
@@ -352,19 +366,59 @@ export class NxtlClient {
     return this.call("GET", "/usage/lines", { options });
   }
 
-  /** GET /usage/cdrs. */
-  usageCdrs(query?: CdrQuery, options?: CallOptions): Promise<ApiResponse<JsonObject>> {
-    assertPage(query?.page, query?.per_page, 500);
-    return this.call("GET", "/usage/cdrs", { query: compactQuery(query), options });
+  /** GET /usage/cdrs. Legacy page mode omits `after_id`. */
+  usageCdrs(query?: CdrQuery, options?: CallOptions): Promise<ApiResponse<CdrList>> {
+    if (query?.after_id === undefined) assertPage(query?.page, query?.per_page, 500);
+    else if (query.per_page !== undefined) assertPage(1, query.per_page, 500);
+    const sent = query?.after_id === undefined ? query : { ...query, page: 1 as const };
+    return this.call("GET", "/usage/cdrs", { query: compactQuery(sent), options });
   }
 
-  iterateUsageCdrs(query?: Omit<CdrQuery, "page">, options?: IterateOptions): AsyncIterable<JsonObject> {
+  /**
+   * Legacy page/per_page iteration. Refuses `after_id` so cursor mode is not
+   * driven by `page` and `pages`.
+   */
+  iterateUsageCdrs(query?: Omit<CdrQuery, "page" | "after_id">, options?: IterateOptions): AsyncIterable<JsonObject> {
     const perPage = query?.per_page ?? 100;
     assertPage(undefined, perPage, 500);
     return iteratePages((page) => this.usageCdrs({ ...query, page, per_page: perPage }, signalOptions(options)), {
       ...options,
       perPage,
     });
+  }
+
+  /**
+   * `after_id` cursor. Requests `accounting=1` and `page=1`. Stops on an empty
+   * page, a null `next_cursor`, or a cursor that does not increase.
+   * `total` and `pages` are not used.
+   */
+  async *iterateAccountingCdrs(
+    query?: Omit<CdrQuery, "page" | "accounting"> & { after_id?: number },
+    options?: IterateOptions,
+  ): AsyncIterable<JsonObject> {
+    const perPage = query?.per_page ?? 100;
+    assertPage(1, perPage, 500);
+    let after = query?.after_id ?? 0;
+    const seen = new Set<number>();
+    for (;;) {
+      const response = await this.usageCdrs({
+        ...query,
+        accounting: 1,
+        after_id: after,
+        page: 1,
+        per_page: perPage,
+      }, signalOptions(options));
+      const rows = Array.isArray(response.data.cdrs) ? response.data.cdrs : [];
+      if (rows.length === 0) return;
+      const last = rows[rows.length - 1]?.id;
+      if (typeof last !== "number" || last <= after) return;
+      for (const row of rows) yield row as unknown as JsonObject;
+      const next = response.data.next_cursor;
+      if (next == null) return;
+      if (typeof next !== "number" || next <= after || seen.has(next)) return;
+      seen.add(next);
+      after = next;
+    }
   }
 
   /** GET /usage/timeseries. `days` maximum 365. */

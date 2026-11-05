@@ -236,16 +236,31 @@ export async function renewLine(
   return { allocation: next, resumed };
 }
 
+/**
+ * Suspend when the configured policy is `suspend` and the allocation is
+ * exhausted, expired, or in overage. Exact exhaustion counts, not only
+ * overage. Another active package with remaining bytes on the same ICCID
+ * blocks the suspend. Manually paused lines are left untouched.
+ */
 export async function suspendOverageLines(
   client: NxtlClient,
   allocations: readonly PackageAllocation[],
   packages: readonly SellablePackage[],
+  options: { manualPauseIccids?: ReadonlySet<string>; now?: Date } = {},
 ): Promise<Array<{ iccid: string; ok: boolean; error?: string }>> {
   const byId = new Map(packages.map((pkg) => [pkg.id, pkg]));
+  const now = options.now ?? new Date();
   const results: Array<{ iccid: string; ok: boolean; error?: string }> = [];
+  const seen = new Set<string>();
   for (const allocation of allocations) {
     const pkg = byId.get(allocation.packageId);
-    if (!pkg || pkg.overage !== "suspend" || allocation.status !== "overage" || !allocation.iccid) continue;
+    if (!pkg || pkg.overage !== "suspend" || !allocation.iccid) continue;
+    if (options.manualPauseIccids?.has(allocation.iccid)) continue;
+    const due = allocation.status === "exhausted" || allocation.status === "expired" || allocation.status === "overage";
+    if (!due) continue;
+    if (hasAlternatePackage(allocation, allocations, byId, now)) continue;
+    if (seen.has(allocation.iccid)) continue;
+    seen.add(allocation.iccid);
     try {
       await client.suspendEsim(allocation.iccid);
       results.push({ iccid: allocation.iccid, ok: true });
@@ -254,6 +269,21 @@ export async function suspendOverageLines(
     }
   }
   return results;
+}
+
+function hasAlternatePackage(
+  current: PackageAllocation,
+  allocations: readonly PackageAllocation[],
+  packages: Map<string, SellablePackage>,
+  now: Date,
+): boolean {
+  return allocations.some((other) => {
+    if (other.id === current.id || other.iccid !== current.iccid) return false;
+    const pkg = packages.get(other.packageId);
+    if (!pkg) return false;
+    if (new Date(other.expiresAt).getTime() <= now.getTime()) return false;
+    return other.consumedBytes < pkg.dataCapBytes + (other.bonusBytes ?? 0) && other.status !== "expired";
+  });
 }
 
 function allocationMatches(allocation: PackageAllocation, pkg: SellablePackage, row: NormalizedUsageRow, now: Date): boolean {
@@ -270,8 +300,9 @@ function allocationAccepts(allocation: PackageAllocation, pkg: SellablePackage, 
 
 function countryMatches(pkg: SellablePackage, row: NormalizedUsageRow): boolean {
   if (pkg.countries.length === 0) return true;
-  if (!row.country) return false;
-  return pkg.countries.includes(row.country.toUpperCase());
+  const code = row.countryIso2 ?? (row.country && /^[A-Za-z]{2}$/.test(row.country) ? row.country.toUpperCase() : undefined);
+  if (!code) return false;
+  return pkg.countries.includes(code);
 }
 
 function refreshStatus(allocation: PackageAllocation, pkg: SellablePackage, now: Date): void {

@@ -1,5 +1,5 @@
 /**
- * Types published by the NXTL B2B OpenAPI document (v2.6.2) plus
+ * Types published by the NXTL B2B OpenAPI document (v2.6.3) plus
  * deliberately loose shapes where that document describes a response
  * but does not publish a schema.
  *
@@ -23,7 +23,12 @@ export type NetworkTierInput = NetworkTier | "standard";
 export type StatusAction = "suspend" | "reactivate" | "terminate";
 
 export type ThresholdScope = "balance" | "esim" | "line";
-export type ThresholdMetric = "balance_below" | "line_usage_pct" | "line_usage_usd_today";
+export type ThresholdMetric =
+  | "balance_below"
+  | "line_usage_pct"
+  | "line_usage_usd_today"
+  | "line_usage_pct_eur"
+  | "line_usage_eur_today";
 export type ThresholdOperator = "<" | "<=" | "=" | ">=" | ">";
 export type ThresholdPeriod = "instant" | "daily" | "weekly" | "monthly";
 export type ThresholdAction = "notify" | "suspend";
@@ -178,6 +183,8 @@ export interface EstimateRequest {
 
 export interface ThresholdNotes {
   cap_per_line_usd?: number;
+  /** Read only by line_usage_pct_eur. Not converted from USD. */
+  cap_per_line_eur?: number;
   min_renotify_seconds?: number;
   [key: string]: unknown;
 }
@@ -282,6 +289,13 @@ export interface CdrQuery {
   until?: string;
   page?: number;
   per_page?: number;
+  /**
+   * `1` joins usage detail and adds `detail_available` and `ledger_id`.
+   * Omit it to keep the legacy empty volume payload.
+   */
+  accounting?: 0 | 1;
+  /** Exclusive cursor. `id > after_id`, ascending. Do not combine with page iteration. */
+  after_id?: number;
 }
 
 export interface TimeseriesQuery {
@@ -334,7 +348,7 @@ export type Ack = JsonObject;
 
 /**
  * Live carrier wallet from GET /esims/{iccid}/wallet.
- * Named by that operation's description: wallet_id, wallet_balance_usd, raw_balance.
+ * The operation description names wallet_id, wallet_balance_usd, and raw_balance.
  * This is not a per-line top-up.
  */
 export interface Wallet {
@@ -343,8 +357,22 @@ export interface Wallet {
   raw_balance?: number;
 }
 
+/**
+ * Stored mirror item inside GET /balance `wallets[]`.
+ * The human reference names iccid, nickname, wallet_balance_usd, and last_sync.
+ * This is not the live carrier read.
+ */
+export interface StoredWalletMirror {
+  iccid?: string;
+  nickname?: string;
+  wallet_balance_usd?: number;
+  last_sync?: string;
+}
+
 /** GET /esims/{iccid}/usage. Page size is fixed at 50. No total or pages count. */
 export interface EsimUsageRow {
+  /** Present when `accounting=1` was requested. Same primary key as a CDR `id`. */
+  ledger_id?: number;
   entry_type: string;
   amount_usd: number;
   amount_eur: number;
@@ -407,7 +435,7 @@ export type Job = JsonObject;
  * The item shape of `wallets` is not a published schema. The live read is GET /esims/{iccid}/wallet.
  */
 export type Balance = JsonObject & {
-  wallets?: JsonObject[];
+  wallets?: StoredWalletMirror[];
 };
 
 /** TODO(spec): GET /balance/history 200 is "Ledger entries" with no schema. */
@@ -439,11 +467,15 @@ export interface UsageEsims {
 }
 
 /**
- * GET /usage/cdrs row. bytes/mb/country/operator/rat/mcc/mnc/tadig are present
- * but empty on the current serializer. Do not treat bytes 0 as measured usage.
+ * GET /usage/cdrs row. Without `accounting=1`, bytes and network text stay empty.
+ * That empty payload is not measured zero. With `accounting=1`, `detail_available`
+ * false means the detail join missed; true with bytes 0 is measured zero.
+ * `ledger_id` equals `id` when accounting is on.
  */
 export interface Cdr {
   id: number;
+  ledger_id?: number;
+  detail_available?: boolean;
   iccid: string;
   provider: string;
   amount_usd: number;
@@ -468,6 +500,8 @@ export interface CdrList {
   total: number;
   page: number;
   pages: number;
+  /** Present in `after_id` mode. Last returned id, or null when the cursor is exhausted. */
+  next_cursor?: number | null;
 }
 
 /** data object of usage.recorded. Amounts are absolute. occurred_at is UTC `Y-m-d H:i:s`. */
@@ -491,6 +525,8 @@ export interface UsageRecordedData {
   mnc: string;
   tadig: string;
   balance_after: number | null;
+  /** Ledger row id when the debit insert returned one. Null on older events. Not the envelope id. */
+  ledger_id?: number | null;
 }
 
 /**

@@ -1,4 +1,4 @@
-"""Types published by OpenAPI 2.6.2, plus loose aliases where no schema exists."""
+"""Types published by OpenAPI 2.6.3, plus loose aliases where no schema exists."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ WEBHOOK_EVENT_NAMES = (
 )
 
 SDK_VERSION = "0.1.0"
-API_SPEC_VERSION = "2.6.2"
+API_SPEC_VERSION = "2.6.3"
 DEFAULT_BASE_URL = "https://nxtlsim.com/api/v1"
 DEFAULT_ORIGIN = "https://nxtlsim.com"
 DEFAULT_USER_AGENT = f"nxtl-esim/{SDK_VERSION} (+https://nxtlsim.com)"

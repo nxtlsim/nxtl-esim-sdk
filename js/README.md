@@ -2,7 +2,7 @@
 
 TypeScript SDK for the [NXTL eSIM](https://nxtlsim.com) B2B API. Issue and manage pay-as-you-go travel eSIMs, read the pooled balance, and verify signed webhooks.
 
-Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.2** (48 operations) at `https://nxtlsim.com/api/v1`.
+Create a business account and API key at [NXTL for Business](https://nxtlsim.com/for-business/). Operation details are in the [API reference](https://nxtlsim.com/nxtl-api-reference/). This package tracks OpenAPI **2.6.3** (48 operations) at `https://nxtlsim.com/api/v1`.
 
 ```bash
 npm install @nxtlsim/esim-sdk
@@ -233,7 +233,11 @@ Everything in this section is bookkeeping in your process. [NXTL eSIM](https://n
 
 Reconciled cost uses the native ledger field selected by `currency`. For current usage that is EUR: `amount_eur` is a signed retail pool debit (for example `-0.42`) and `amount_usd` is `0`. That zero is not an FX conversion and is not free usage. The positive value is the NXTL API charge, the reseller's acquisition cost. It is not NXTL's upstream wholesale cost. Markup and margin sit on top of that charge. The public per-GB feed is only for separate trip quotes, never a fallback for reconciled charges.
 
-`GET /usage/cdrs` returns `{ cdrs, total, page, pages }`. Its `bytes` and country text are placeholders on the current serializer and are not used for country reports or package allowances. `GET /esims/{iccid}/usage` returns `{ iccid, provider, page, usage }` with a fixed page size of 50. Only `entry_type: "usage"` contributes octets and a country name such as `Germany`. `mb` is `bytes / 1048576`. `GET /usage/esims` and `GET /usage/lines` return `{ window, lines }`. `usage_usd`, `usage_eur`, and `usage_events` are JSON strings; `parseRollupNumber` converts them. Money and volume stay in separate streams so a CDR charge and a per-line volume row are not billed twice. CDR ledger ids and webhook event ids are not joined. Sync dedup keys are stored with the wallet write. Missing volume is not reported as a measured zero.
+`GET /usage/cdrs` returns `{ cdrs, total, page, pages }`. Without `accounting=1`, bytes and network text stay empty. That is not measured zero. Reseller sync calls `accounting=1`. `detail_available: false` means the detail is missing and stays pending. `detail_available: true` with `bytes: 0` is measured zero. `ledger_id` equals `id`. `after_id` walks `id > after_id` in ascending order, always with `page=1`. `next_cursor` is the last id or null. Page and `pages` do not drive that cursor. A checkpoint is stored per account, ICCID, and date window only after the batch commits.
+
+`GET /esims/{iccid}/usage` and `GET /esims/{iccid}/events` add `ledger_id` only when `accounting=1`. The request ICCID is copied onto rows that omit it. `usage.recorded` `data.ledger_id` is the ledger id or null. `data.idempotency_key` identifies the ledger operation. The envelope `id` is the delivery, not the ledger row. A webhook without `ledger_id` is not charged. The same ledger id is not debited from a CDR and again from a webhook or per-line row.
+
+Wallet postings use the same markup and FX as the report. The acquisition cost, selling charge, and margin stay separate. Currencies are not added without a rate. Missing FX leaves the row pending and unapplied. Credits post the acquisition amount with no markup. Amounts round half away from zero to 4 decimal places. JSON commits replace the file atomically and are single-process. SQL commits require a real transaction. Package country `Germany` matches ISO `DE`. Exact exhaustion and expiry follow the suspend policy unless another package on that ICCID still has room. A manual pause is never resumed automatically. `POST /esims` returning 202 is accepted work, not a finished eSIM, and it has no activation code.
 
 `snapshotUsage` plus `diffSnapshots` turns two polls into the rows and money added since the previous snapshot. `toBytes` / `formatData` normalise B, KB, MB, GB, and TB on a 1000-based scale.
 

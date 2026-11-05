@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 CUSTOMER_STORE_SQL = """
 CREATE TABLE nxtl_reseller_customers (
@@ -26,7 +27,8 @@ CREATE TABLE nxtl_reseller_lines (
   iccid TEXT NOT NULL,
   label TEXT,
   assigned_at TEXT NOT NULL,
-  unassigned_at TEXT
+  unassigned_at TEXT,
+  manual_pause INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE nxtl_reseller_wallet (
   id TEXT PRIMARY KEY,
@@ -57,7 +59,34 @@ CREATE TABLE nxtl_reseller_invoices (
   customer_id TEXT NOT NULL,
   document_json TEXT NOT NULL
 );
+CREATE TABLE nxtl_reseller_applied (
+  stream TEXT NOT NULL,
+  dedup_key TEXT NOT NULL,
+  PRIMARY KEY (stream, dedup_key)
+);
+CREATE TABLE nxtl_reseller_checkpoints (
+  scope TEXT PRIMARY KEY,
+  after_id INTEGER NOT NULL
+);
+CREATE TABLE nxtl_reseller_pending (
+  scope TEXT NOT NULL,
+  ledger_id INTEGER NOT NULL,
+  iccid TEXT NOT NULL,
+  created_at TEXT,
+  PRIMARY KEY (scope, ledger_id)
+);
+CREATE TABLE nxtl_reseller_failed_actions (
+  id TEXT PRIMARY KEY,
+  iccid TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  error TEXT NOT NULL,
+  at TEXT NOT NULL
+);
 """.strip()
+
+CUSTOMER_STORE_MIGRATIONS = [
+    "ALTER TABLE nxtl_reseller_lines ADD COLUMN manual_pause INTEGER NOT NULL DEFAULT 0",
+]
 
 
 class CustomerStore(Protocol):
@@ -89,6 +118,9 @@ class MemoryCustomerStore:
         self.snapshots: list[dict[str, Any]] = []
         self.invoices: list[dict[str, Any]] = []
         self.applied: list[dict[str, str]] = []
+        self.checkpoints: list[dict[str, Any]] = []
+        self.pending: list[dict[str, Any]] = []
+        self.failed_actions: list[dict[str, Any]] = []
 
     def put_customer(self, customer: Mapping[str, Any]) -> None:
         _upsert(self.customers, dict(customer))
@@ -164,12 +196,34 @@ class MemoryCustomerStore:
     def has_applied(self, stream: str, key: str) -> bool:
         return any(item["stream"] == stream and item["key"] == key for item in self.applied)
 
-    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None) -> None:
-        for entry in wallet or []:
-            self.wallet.append(dict(entry))
-        for item in applied or []:
-            if not self.has_applied(item["stream"], item["key"]):
-                self.applied.append(dict(item))
+    def get_checkpoint(self, scope: str) -> int:
+        for item in self.checkpoints:
+            if item["scope"] == scope:
+                return int(item["after_id"])
+        return 0
+
+    def list_pending(self, scope: str) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.pending if item["scope"] == scope]
+
+    def list_failed_actions(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.failed_actions]
+
+    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None, **extra: Any) -> None:
+        draft = {
+            "wallet": [dict(item) for item in self.wallet],
+            "applied": [dict(item) for item in self.applied],
+            "allocations": [dict(item) for item in self.allocations],
+            "checkpoints": [dict(item) for item in self.checkpoints],
+            "pending": [dict(item) for item in self.pending],
+            "failed_actions": [dict(item) for item in self.failed_actions],
+        }
+        _apply_commit(draft, wallet, applied, extra)
+        self.wallet = draft["wallet"]
+        self.applied = draft["applied"]
+        self.allocations = draft["allocations"]
+        self.checkpoints = draft["checkpoints"]
+        self.pending = draft["pending"]
+        self.failed_actions = draft["failed_actions"]
 
 
 class JsonFileCustomerStore(MemoryCustomerStore):
@@ -199,8 +253,12 @@ class JsonFileCustomerStore(MemoryCustomerStore):
                 super().put_snapshot(item)
             for item in data.get("invoices", []):
                 super().put_invoice(item)
-            for item in data.get("applied", []):
-                super().commit_sync(applied=[item])
+            super().commit_sync(
+                applied=data.get("applied", []),
+                checkpoints=data.get("checkpoints", []),
+                pending=data.get("pending", []),
+                failed_actions=data.get("failed_actions", []),
+            )
         self._loaded = True
 
     def _persist(self) -> None:
@@ -213,6 +271,9 @@ class JsonFileCustomerStore(MemoryCustomerStore):
             "snapshots": self.list_snapshots(),
             "invoices": self.list_invoices(),
             "applied": list(self.applied),
+            "checkpoints": list(self.checkpoints),
+            "pending": list(self.pending),
+            "failed_actions": list(self.failed_actions),
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -291,17 +352,51 @@ class JsonFileCustomerStore(MemoryCustomerStore):
         self._load()
         return super().has_applied(stream, key)
 
-    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None) -> None:
+    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None, **extra: Any) -> None:
         self._load()
-        super().commit_sync(wallet, applied)
-        self._persist()
+        draft_wallet = [dict(item) for item in self.wallet]
+        draft_applied = [dict(item) for item in self.applied]
+        draft_allocations = [dict(item) for item in self.allocations]
+        draft = {
+            "wallet": draft_wallet,
+            "applied": draft_applied,
+            "allocations": draft_allocations,
+            "checkpoints": [dict(item) for item in self.checkpoints],
+            "pending": [dict(item) for item in self.pending],
+            "failed_actions": [dict(item) for item in self.failed_actions],
+        }
+        _apply_commit(draft, wallet, applied, extra)
+        payload = dict(self._dump_state())
+        payload = {
+            "customers": self.list_customers(),
+            "assignments": self.list_assignments(),
+            "packages": self.list_packages(),
+            "snapshots": self.list_snapshots(),
+            "invoices": self.list_invoices(),
+            "wallet": draft["wallet"],
+            "applied": draft["applied"],
+            "allocations": draft["allocations"],
+            "checkpoints": draft["checkpoints"],
+            "pending": draft["pending"],
+            "failed_actions": draft["failed_actions"],
+        }
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(temporary, self.path)
+        self.wallet = draft["wallet"]
+        self.applied = draft["applied"]
+        self.allocations = draft["allocations"]
+        self.checkpoints = draft["checkpoints"]
+        self.pending = draft["pending"]
+        self.failed_actions = draft["failed_actions"]
 
 
 class SqlCustomerStore:
     """Example SQL adapter. ``query(sql, params)`` returns a list of row mappings. Placeholders are ``?``."""
 
-    def __init__(self, query: Any) -> None:
+    def __init__(self, query: Any, transaction: Callable[[Callable[[Any], Any]], Any] | None = None) -> None:
         self.query = query
+        self.transaction = transaction
 
     def put_customer(self, customer: Mapping[str, Any]) -> None:
         self.query(
@@ -336,10 +431,10 @@ class SqlCustomerStore:
 
     def put_assignment(self, assignment: Mapping[str, Any]) -> None:
         self.query(
-            """INSERT INTO nxtl_reseller_lines (id, customer_id, iccid, label, assigned_at, unassigned_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET unassigned_at=excluded.unassigned_at, label=excluded.label""",
-            [assignment["id"], assignment["customer_id"], assignment["iccid"], assignment.get("label"), assignment["assigned_at"], assignment.get("unassigned_at")],
+            """INSERT INTO nxtl_reseller_lines (id, customer_id, iccid, label, assigned_at, unassigned_at, manual_pause)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET unassigned_at=excluded.unassigned_at, label=excluded.label, manual_pause=excluded.manual_pause""",
+            [assignment["id"], assignment["customer_id"], assignment["iccid"], assignment.get("label"), assignment["assigned_at"], assignment.get("unassigned_at"), 1 if assignment.get("manual_pause") else 0],
         )
 
     def list_assignments(self, **filters: Any) -> list[dict[str, Any]]:
@@ -416,14 +511,74 @@ class SqlCustomerStore:
     def has_applied(self, stream: str, key: str) -> bool:
         return bool(self.query("SELECT dedup_key FROM nxtl_reseller_applied WHERE stream = ? AND dedup_key = ?", [stream, key]))
 
-    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None) -> None:
-        for entry in wallet or []:
-            self.put_wallet_entry(entry)
-        for item in applied or []:
-            self.query(
-                "INSERT INTO nxtl_reseller_applied (stream, dedup_key) VALUES (?, ?) ON CONFLICT(stream, dedup_key) DO NOTHING",
-                [item["stream"], item["key"]],
-            )
+    def get_checkpoint(self, scope: str) -> int:
+        rows = self.query("SELECT after_id FROM nxtl_reseller_checkpoints WHERE scope = ?", [scope])
+        return int(rows[0]["after_id"]) if rows else 0
+
+    def list_pending(self, scope: str) -> list[dict[str, Any]]:
+        rows = self.query("SELECT * FROM nxtl_reseller_pending WHERE scope = ?", [scope])
+        return [{"scope": scope, "ledger_id": int(row["ledger_id"]), "iccid": row["iccid"], "created_at": row.get("created_at")} for row in rows]
+
+    def list_failed_actions(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.query("SELECT * FROM nxtl_reseller_failed_actions", [])]
+
+    def commit_sync(self, wallet: list[dict[str, Any]] | None = None, applied: list[dict[str, str]] | None = None, **extra: Any) -> None:
+        if self.transaction is None:
+            raise TypeError("SqlCustomerStore.commit_sync requires a transaction callback. Separate writes are not atomic.")
+
+        def run(query: Any) -> None:
+            _apply_sql(query, wallet, applied, extra)
+
+        self.transaction(run)
+
+
+def _apply_commit(draft: dict[str, list], wallet: list[dict[str, Any]] | None, applied: list[dict[str, str]] | None, extra: Mapping[str, Any]) -> None:
+    draft["wallet"].extend(dict(item) for item in wallet or [])
+    for item in applied or []:
+        if not any(current["stream"] == item["stream"] and current["key"] == item["key"] for current in draft["applied"]):
+            draft["applied"].append(dict(item))
+    for allocation in extra.get("allocations") or []:
+        _upsert(draft["allocations"], dict(allocation))
+    for checkpoint in extra.get("checkpoints") or []:
+        replaced = False
+        for index, current in enumerate(draft["checkpoints"]):
+            if current["scope"] == checkpoint["scope"]:
+                draft["checkpoints"][index] = dict(checkpoint)
+                replaced = True
+        if not replaced:
+            draft["checkpoints"].append(dict(checkpoint))
+    clear = {(item["scope"], item["ledger_id"]) for item in extra.get("clear_pending") or []}
+    draft["pending"] = [item for item in draft["pending"] if (item["scope"], item["ledger_id"]) not in clear]
+    for item in extra.get("pending") or []:
+        if not any(current["scope"] == item["scope"] and current["ledger_id"] == item["ledger_id"] for current in draft["pending"]):
+            draft["pending"].append(dict(item))
+    clear_failed = set(extra.get("clear_failed") or [])
+    draft["failed_actions"] = [item for item in draft["failed_actions"] if item["id"] not in clear_failed]
+    for action in extra.get("failed_actions") or []:
+        if not any(current["id"] == action["id"] for current in draft["failed_actions"]):
+            draft["failed_actions"].append(dict(action))
+
+
+def _apply_sql(query: Any, wallet: list[dict[str, Any]] | None, applied: list[dict[str, str]] | None, extra: Mapping[str, Any]) -> None:
+    for entry in wallet or []:
+        query(
+            "INSERT INTO nxtl_reseller_wallet (id, customer_id, at, kind, amount, currency, memo, reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [entry["id"], entry["customer_id"], entry["at"], entry["kind"], entry["amount"], entry["currency"], entry.get("memo"), entry.get("reference")],
+        )
+    for item in applied or []:
+        query("INSERT INTO nxtl_reseller_applied (stream, dedup_key) VALUES (?, ?)", [item["stream"], item["key"]])
+    for checkpoint in extra.get("checkpoints") or []:
+        query(
+            "INSERT INTO nxtl_reseller_checkpoints (scope, after_id) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET after_id=excluded.after_id",
+            [checkpoint["scope"], checkpoint["after_id"]],
+        )
+    for item in extra.get("clear_pending") or []:
+        query("DELETE FROM nxtl_reseller_pending WHERE scope = ? AND ledger_id = ?", [item["scope"], item["ledger_id"]])
+    for item in extra.get("pending") or []:
+        query(
+            "INSERT INTO nxtl_reseller_pending (scope, ledger_id, iccid, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(scope, ledger_id) DO UPDATE SET created_at=excluded.created_at",
+            [item["scope"], item["ledger_id"], item["iccid"], item.get("created_at")],
+        )
 
 
 def _upsert(items: list[dict[str, Any]], item: dict[str, Any]) -> None:
@@ -465,6 +620,8 @@ def _assignment_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
         assignment["label"] = row["label"]
     if row.get("unassigned_at"):
         assignment["unassigned_at"] = row["unassigned_at"]
+    if int(row.get("manual_pause") or 0) == 1:
+        assignment["manual_pause"] = True
     return assignment
 
 

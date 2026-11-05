@@ -10,6 +10,7 @@ import type { NxtlClient } from "../client.js";
 import { quotePrice, type MarkupConfig } from "../pricing.js";
 import type { JsonObject } from "../types.js";
 import { convertFx, type FxTable } from "./fx.js";
+import { countryNameToIso2 } from "./countries.js";
 import { apiCharge, parseUtcTimestamp, webhookCharge } from "./ledger.js";
 
 export type UsageSource = "cdr" | "line_usage" | "webhook" | "manual";
@@ -21,9 +22,13 @@ export type UsagePeriod =
 
 export interface NormalizedUsageRow {
   source: UsageSource;
-  /** CDR ledger id. Not comparable to a webhook event id. */
+  /** CDR ledger id or accounting `ledger_id`. Not a webhook delivery id. */
   ledgerId?: number;
+  /** Webhook envelope id. Identifies the delivery, not the ledger row. */
   eventId?: string;
+  /** False means missing detail, not measured zero. Absent on legacy payloads. */
+  detailAvailable?: boolean;
+  countryIso2?: string;
   entryType?: string;
   iccid?: string;
   at?: string;
@@ -131,7 +136,7 @@ export function periodBounds(period: UsagePeriod): { since: string; until: strin
   return { since: period.since, until: period.until };
 }
 
-export function normalizeUsageRow(raw: JsonObject, source: UsageSource = "manual"): NormalizedUsageRow {
+export function normalizeUsageRow(raw: JsonObject, source: UsageSource = "manual", context: { iccid?: string } = {}): NormalizedUsageRow {
   const sourceKeys: string[] = [source];
   const iccid = readString(raw, ["iccid"], sourceKeys);
   const atRaw = readString(raw, TIME_KEYS, sourceKeys);
@@ -151,17 +156,29 @@ export function normalizeUsageRow(raw: JsonObject, source: UsageSource = "manual
     chargeKind: money.kind,
     consumptionCharge: money.consumptionCharge,
   };
-  if (typeof raw.id === "number" && source === "cdr") row.ledgerId = raw.id;
+  if (source === "cdr") {
+    const ledger = typeof raw.ledger_id === "number" ? raw.ledger_id : typeof raw.id === "number" ? raw.id : undefined;
+    if (ledger !== undefined) row.ledgerId = ledger;
+  } else if (typeof raw.ledger_id === "number") {
+    row.ledgerId = raw.ledger_id;
+  }
   if (typeof raw.id === "string" && source === "webhook") row.eventId = raw.id;
+  if (typeof raw.detail_available === "boolean") row.detailAvailable = raw.detail_available;
   if (entryType) row.entryType = entryType;
   if (iccid) row.iccid = iccid;
+  else if (context.iccid) row.iccid = context.iccid;
   if (at) row.at = at;
   if (amountUsd !== undefined) row.amountUsd = amountUsd;
   if (amountEur !== undefined) row.amountEur = amountEur;
   if (currency) row.currency = currency;
   if (money.currency) row.currency = money.currency || row.currency;
-  const trustVolume = source === "manual" || (source === "line_usage" && entryType === "usage") || (source === "webhook" && (readNumber(raw, ["bytes"], sourceKeys) ?? 0) > 0);
-  if (trustVolume) {
+  const trustVolume = source === "manual"
+    || (source === "line_usage" && entryType === "usage")
+    || (source === "cdr" && row.detailAvailable === true)
+    || (source === "webhook" && (readNumber(raw, ["bytes"], sourceKeys) ?? 0) > 0);
+  if (source === "cdr" && row.detailAvailable !== true) {
+    row.volumeTrusted = false;
+  } else if (trustVolume) {
     const bytes = source === "line_usage" || source === "webhook"
       ? readNumber(raw, ["bytes"], sourceKeys)
       : readBytes(raw, sourceKeys);
@@ -173,6 +190,8 @@ export function normalizeUsageRow(raw: JsonObject, source: UsageSource = "manual
     if (country && country.trim()) {
       const trimmed = country.trim();
       row.country = source === "manual" && /^[a-z]{2}$/i.test(trimmed) ? trimmed.toUpperCase() : trimmed;
+      const iso = countryNameToIso2(row.country);
+      if (iso) row.countryIso2 = iso;
     }
   }
   const network = readString(raw, ["network", "operator"], sourceKeys);
@@ -281,33 +300,27 @@ export async function loadUsageDetails(
   const bounds = periodBounds(input.period);
   const notes: string[] = [];
   const cdrs: NormalizedUsageRow[] = [];
-  const query: { iccid?: string; since: string; until: string; per_page: number } = {
+  const query: { iccid?: string; since: string; until: string; per_page: number; after_id: number } = {
     since: bounds.since,
     until: bounds.until,
     per_page: 100,
+    after_id: 0,
   };
   if (input.iccid) query.iccid = input.iccid;
-  for await (const row of client.iterateUsageCdrs(query)) {
-    cdrs.push(normalizeUsageRow(row, "cdr"));
+  for await (const row of client.iterateAccountingCdrs(query)) {
+    cdrs.push(normalizeUsageRow(row, "cdr", input.iccid ? { iccid: input.iccid } : {}));
   }
-  let lineRows: NormalizedUsageRow[] = [];
-  let volumeComplete = true;
-  if (input.iccid) {
-    try {
-      for await (const row of client.iterateEsimUsage(input.iccid)) {
-        lineRows.push(normalizeUsageRow(row, "line_usage"));
-      }
-    } catch (error) {
-      volumeComplete = false;
-      notes.push(error instanceof Error ? error.message : "Per-line usage page walk failed");
-    }
-    notes.push("GET /esims/{iccid}/usage has no since/until parameter. Page size is 50. Only entry_type usage supplies bytes and country. CDR placeholders are kept as a separate charge stream and are not used as volume.");
-  } else {
-    volumeComplete = false;
-    notes.push("No ICCID was requested, so per-line volume was not collected. CDR bytes are not measured consumption.");
+  const capabilityUnavailable = cdrs.some((row) => row.detailAvailable === undefined);
+  const detailPending = cdrs.some((row) => row.detailAvailable === false);
+  if (capabilityUnavailable) {
+    notes.push("accounting=1 was requested but detail_available was absent. Volume is unavailable and is not treated as measured zero.");
   }
-  const report = buildUsageReport([...cdrs, ...lineRows], input.period, input);
-  report.volumeComplete = volumeComplete && input.iccid !== undefined;
+  if (detailPending) {
+    notes.push("Some accounting CDRs have detail_available false. Their charges can post while volume stays pending. An after_id cursor will not revisit them.");
+  }
+  notes.push("Accounting CDRs are the charge and volume source. Per-line rows and webhooks are not added here, so the same ledger id is not consumed twice.");
+  const report = buildUsageReport(cdrs, input.period, input);
+  report.volumeComplete = !capabilityUnavailable && !detailPending;
   report.notes.push(...notes);
   if (input.includePartnerRollups) {
     const days = Math.min(365, Math.max(1, Math.ceil((Date.parse(bounds.until) - Date.parse(bounds.since)) / 86_400_000)));

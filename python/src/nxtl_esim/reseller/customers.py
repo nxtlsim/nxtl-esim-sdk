@@ -82,11 +82,15 @@ class CustomerDirectory:
         lines = self.store.list_assignments(customer_id=customer_id, active_only=True)
         rows: list[Mapping[str, Any]] = []
         notes: list[str] = []
+        volume_complete = bool(lines)
         for line in lines:
             report = load_usage_details(self.client, period=period, iccid=line["iccid"], **options)
             rows.extend(report["rows"])
             notes.extend(report["notes"])
+            if not report.get("volume_complete", False):
+                volume_complete = False
         combined = build_usage_report(rows, period, options)
+        combined["volume_complete"] = volume_complete
         combined["notes"].extend(notes)
         return combined
 
@@ -144,6 +148,9 @@ class CustomerDirectory:
                     self.client.suspend_esim(line["iccid"])
                 else:
                     self.client.resume_esim(line["iccid"])
+                updated = dict(line)
+                updated["manual_pause"] = action == "suspend"
+                self.store.put_assignment(updated)
                 results.append({"iccid": line["iccid"], "ok": True})
             except Exception as exc:  # noqa: BLE001
                 results.append({"iccid": line["iccid"], "ok": False, "error": str(exc)})
@@ -196,11 +203,15 @@ class AsyncCustomerDirectory(CustomerDirectory):
         lines = self.store.list_assignments(customer_id=customer_id, active_only=True)
         rows: list[Mapping[str, Any]] = []
         notes: list[str] = []
+        volume_complete = bool(lines)
         for line in lines:
             report = await load_usage_details_async(self.client, period=period, iccid=line["iccid"], **options)
             rows.extend(report["rows"])
             notes.extend(report["notes"])
+            if not report.get("volume_complete", False):
+                volume_complete = False
         combined = build_usage_report(rows, period, options)
+        combined["volume_complete"] = volume_complete
         combined["notes"].extend(notes)
         return combined
 
@@ -219,6 +230,9 @@ class AsyncCustomerDirectory(CustomerDirectory):
                     await self.client.suspend_esim(line["iccid"])
                 else:
                     await self.client.resume_esim(line["iccid"])
+                updated = dict(line)
+                updated["manual_pause"] = action == "suspend"
+                self.store.put_assignment(updated)
                 results.append({"iccid": line["iccid"], "ok": True})
             except Exception as exc:  # noqa: BLE001
                 results.append({"iccid": line["iccid"], "ok": False, "error": str(exc)})
