@@ -1,5 +1,7 @@
 """English country names to ISO 3166-1 alpha-2. Network text is not an input."""
 
+from __future__ import annotations
+
 NAMES = {
     "albania": "AL",
     "austria": "AT",
