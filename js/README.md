@@ -223,9 +223,62 @@ const batch = await submitAndCollectBulkIssue(nxtl, {
 
 `readIssuanceFee(quotas)` returns a number only when a candidate key is present.
 
+## Reseller layer
+
+Everything in this section is bookkeeping in your process. [NXTL eSIM](https://nxtlsim.com) sells pay-as-you-go data on a pooled balance. It does not store your customers, packages, or customer invoices. Create the API key at [NXTL for Business](https://nxtlsim.com/for-business/).
+
+### Usage and cost
+
+`loadUsageDetails` calls `GET /usage/cdrs` (and `GET /esims/{iccid}/usage` for one line). With `includePartnerRollups` it also calls `GET /usage/summary`, `GET /usage/esims`, and `GET /usage/timeseries`. Periods are `daily`, `monthly`, or a custom `range`.
+
+Wholesale cost uses `amount_usd` / `amount_eur` when the row has them. A zero in the converted currency is not treated as free. If those fields are missing and the row has bytes plus a country, the public pricing feed supplies EUR per GB. Retail applies your markup. Margin is retail minus wholesale. `byLine`, `byDay`, `byMonth`, and `byCountry` group the same rows. The per-country list stays empty when no row carries a country field, which the OpenAPI schema does not define.
+
+`snapshotUsage` plus `diffSnapshots` turns two polls into the rows and money added since the previous snapshot. `toBytes` / `formatData` normalise B, KB, MB, GB, and TB on a 1000-based scale.
+
+### Customers
+
+`MemoryCustomerStore` is the default. `JsonFileCustomerStore` is a single JSON file. `SqlCustomerStore` runs the statements in `CUSTOMER_STORE_SQL` through a `query(sql, params)` function you connect to a driver.
+
+```ts
+const directory = new CustomerDirectory(new MemoryCustomerStore(), nxtl);
+const customer = await directory.saveCustomer({ name: "Ada", externalId: "crm-1", tags: ["vip"] });
+await directory.assignLine(customer.id, iccid, "handset");
+await directory.credit(customer.id, 40, "EUR", "prepaid wallet");
+const low = await directory.isLowBalance(customer.id, "EUR", 10);
+await directory.suspendCustomer(customer.id); // POST /esims/{iccid}/suspend on each active line
+```
+
+`flagCustomer` only changes the store. The wallet is yours: credits, debits, and low-balance checks do not call `POST /topup`.
+
+### Packages
+
+`definePackage({ name: "Europe 5GB 30 days", dataCapGb: 5, validityDays: 30, countries: ["FR", "DE"], price: 25, currency: "EUR" })` is a product you sell. `openAllocation` starts the clock. `applyUsageToPackages` draws bytes FIFO (earliest start) or by priority (lowest number first). `topUpAllocation` and `renewAllocation` add days or bytes in the store.
+
+Overage `flag` marks the allocation. Overage `suspend` can call `suspendOverageLines`, which uses `POST /esims/{iccid}/suspend`. `syncPackageThreshold` creates a NXTL rule only when you set `usdCap`, using metric `line_usage_usd_today` and `notes.cap_per_line_usd`. The API has no multi-day byte-cap metric, so a GB allowance is enforced in the store, not as a network cap.
+
+### Billing
+
+`buildCustomerInvoice` writes usage (wholesale), markup, and package-fee lines for one customer and period. `invoicesToCsv` and `invoicesToJson` export them. `buildStatement` rolls wallet credits and debits. `marginReport` sums revenue, cost, and margin. `convertFx` uses a rate table you supply: `rates.EUR = 1.1` with base USD means 1 EUR = 1.1 USD.
+
+### Monitoring
+
+`ensureUsagePercentRule` posts metric `line_usage_pct`. `ensurePoolBalanceRule` posts `balance_below`. `WebhookRouter` dispatches the published event names (`esim.provisioned`, `usage.recorded`, `balance.low`, `job.completed`, `job.failed`, and the rest of `WEBHOOK_EVENT_NAMES`). `syncReseller` polls each active customer's lines, stores a snapshot, debits the wallet by the retail delta, applies package consumption, and emits low-balance and overage alerts. `scheduleSync(run, intervalMs)` is a local timer.
+
+### Catalog, quotes, provisioning, lifecycle, audit
+
+`searchCatalog` filters the public pricing, destination, and coverage files by country, text, and max EUR per GB. A region query matches destination rows of type `region` only. Those rows do not list member countries.
+
+`quoteTrip({ countries, estimatedGb, pricing, markup })` prices the public per-GB feed. `split: "even"` divides the gigabytes across countries. `split: "each"` prices the full amount in every country. Pass `issuanceFee` from `estimate` or `quotas` when you want the profile fee in the same total. This is not a substitute for `POST /esims/estimate`.
+
+`provisionCustomers` calls `POST /esims` once per customer so each row keeps its own `client_reference`. `POST /esims/bulk-issue` is one reference for the whole batch, so it is not used here. With `wait: true` the helper polls `GET /jobs/{id}` and assigns the ICCID when the job JSON contains one.
+
+`lineLifecycle` covers issue, status, suspend, resume, terminate, wallet, events, and `poolTopup`. Terminate is permanent. There is no DELETE eSIM operation and no per-line top-up. `readAudit` walks `GET /audit` and calls your hook for each row.
+
 ## Examples
 
-See `/examples` in the repository: Express checkout, WooCommerce-style fulfilment, and Shopify-style fulfilment.
+- Express checkout, WooCommerce-style fulfilment, and Shopify-style fulfilment under `/examples`.
+- [`examples/reseller-dashboard/sync.mjs`](../examples/reseller-dashboard/sync.mjs) polls usage into the customer store.
+- [`examples/monthly-billing/export.mjs`](../examples/monthly-billing/export.mjs) writes a CSV invoice for a pay-as-you-go period.
 
 ## Release
 

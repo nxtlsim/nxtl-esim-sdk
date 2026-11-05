@@ -43,6 +43,10 @@ Samples, not store plugins:
 - [`examples/woocommerce-fulfilment/server.mjs`](examples/woocommerce-fulfilment/server.mjs) — WooCommerce-style order webhook, then NXTL fulfilment.
 - [`examples/shopify-fulfilment/server.mjs`](examples/shopify-fulfilment/server.mjs) — Shopify-style order webhook, then NXTL fulfilment.
 - [`examples/fastapi-fulfilment/main.py`](examples/fastapi-fulfilment/main.py) — the same flow on FastAPI.
+- [`examples/reseller-dashboard/sync.mjs`](examples/reseller-dashboard/sync.mjs) — poll usage into a reseller customer store.
+- [`examples/monthly-billing/export.mjs`](examples/monthly-billing/export.mjs) and [`export.py`](examples/monthly-billing/export.py) — invoice CSV for a pay-as-you-go period.
+
+The reseller layer (customers, prepaid wallets, sellable packages, invoices, sync) is local state on top of the API. NXTL eSIM does not host those records. Packages you define are not NXTL plans.
 
 ## Develop
 
@@ -70,6 +74,11 @@ The OpenAPI document names every operation and fully schemas errors, eSIM object
 - Network tier `standard` is accepted by the API and stored as `cheapest`. It is not in the published enum. The SDK allows it on input.
 - Some earlier operations can return `{ "error": "code" }` instead of the structured envelope. The error parser accepts both. HTTP status selects the exception class.
 - No separate public sandbox base URL is documented. Point `baseUrl` / `base_url` at the host you were given.
+- There is no customer, package, or customer-invoice resource. Those SDKs records are reseller-side. `GET /invoices` lists orders for API pool top-ups.
+- CDR and per-line usage schemas do not name country or bytes. Country and volume breakdowns are filled only when a row already has those keys. Otherwise wholesale cost uses `amount_usd` / `amount_eur`.
+- Threshold metrics are `balance_below`, `line_usage_pct`, and `line_usage_usd_today`. A multi-day gigabyte allowance cannot be installed as a NXTL rule. `notes.cap_per_line_usd` is a USD figure.
+- There is no per-line top-up and no DELETE eSIM. `POST /topup` credits the partner pool from prepaid budget. Terminate is permanent.
+- Public destination region rows do not list member countries, so region search does not expand to ISO codes.
 
 ## License
 

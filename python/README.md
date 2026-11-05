@@ -247,9 +247,58 @@ submit_and_collect_bulk_issue(
 
 `assess_balance` uses `status="unknown"` when no candidate amount key is present. `sum_usage_amounts` sets `zero_is_not_free` when one of `amount_usd` / `amount_eur` is zero and the other is not.
 
-## FastAPI sample
+## Reseller layer
 
-[`examples/fastapi-fulfilment/main.py`](../examples/fastapi-fulfilment/main.py).
+Customer records, packages, wallets, and customer invoices live in your process. [NXTL eSIM](https://nxtlsim.com) is pay-as-you-go on a pooled balance. It does not store your customers or the packages you sell. API keys come from [NXTL for Business](https://nxtlsim.com/for-business/). Import the helpers from `nxtl_esim.reseller`. Async network calls are `load_usage_details_async`, `AsyncCustomerDirectory`, `sync_reseller_async`, and `provision_customers_async`.
+
+### Usage and cost
+
+`load_usage_details` reads `GET /usage/cdrs` and, for one ICCID, `GET /esims/{iccid}/usage`. Periods are daily, monthly, or a custom range. `include_partner_rollups=True` also calls summary, per-eSIM, and timeseries. Those last two day-count endpoints are capped at 365 days.
+
+Wholesale prefers `amount_usd` / `amount_eur`. A zero converted amount is not free usage. Bytes plus a country can be priced from the public EUR-per-GB feed. Reports include `by_line`, `by_day`, `by_month`, and `by_country`. Country groups stay empty unless a row already has a country field. The OpenAPI schema does not name one. `snapshot_usage` and `diff_snapshots` compute the delta between polls. `to_bytes` and `format_data` convert B/KB/MB/GB/TB on a 1000-based scale.
+
+### Customers
+
+`MemoryCustomerStore` is the default. `JsonFileCustomerStore` writes one JSON file. `SqlCustomerStore` sends `CUSTOMER_STORE_SQL` through your `query(sql, params)` callable. Placeholders are `?`.
+
+```python
+directory = CustomerDirectory(MemoryCustomerStore(), nxtl)
+customer = directory.save_customer({"id": "cus_1", "name": "Ada", "external_id": "crm-1", "tags": ["vip"]})
+directory.assign_line(customer["id"], iccid, "handset")
+directory.credit(customer["id"], 40, "EUR", "prepaid wallet")
+directory.suspend_customer(customer["id"])  # POST /esims/{iccid}/suspend
+```
+
+`flag_customer` only updates the store. Wallet credits and debits do not call `POST /topup`.
+
+### Packages
+
+`define_package` with a name such as `Europe 5GB 30 days`, a data cap, validity, country list, and price is your product. `open_allocation` starts it. `apply_usage_to_packages` consumes bytes FIFO or by priority. `top_up_allocation` and `renew_allocation` extend the store record.
+
+`overage="suspend"` can call `suspend_overage_lines`. `sync_package_threshold` posts `line_usage_usd_today` only when `usd_cap` is set. A gigabyte allowance is not a published threshold metric, so the cap is tracked in the store.
+
+### Billing
+
+`build_customer_invoice` emits usage, markup, and package-fee lines. `invoices_to_csv` and `invoices_to_json` export them. `build_statement` includes wallet movement. `margin_report` sums revenue, cost, and margin. `convert_fx` uses your rates: base USD and `rates["EUR"] = 1.1` means 1 EUR = 1.1 USD.
+
+### Monitoring
+
+`ensure_usage_percent_rule` posts `line_usage_pct`. `ensure_pool_balance_rule` posts `balance_below`. `WebhookRouter.on` handles the event names in `WEBHOOK_EVENT_NAMES`, including `usage.recorded`, `balance.low`, `job.completed`, and `esim.provisioned`. `sync_reseller` polls active lines, snapshots usage, debits the retail delta, applies packages, and raises low-balance and overage alerts. `sync_loop` is a local async timer.
+
+### Catalog, quotes, provisioning, lifecycle, audit
+
+`search_catalog` filters pricing, destinations, and coverage by country, text, and max EUR per GB. Region search matches destination rows of type `region` and does not expand them to ISO codes.
+
+`quote_trip` prices the public per-GB feed. `split="even"` divides gigabytes across countries. `split="each"` prices the full amount in every country. `issuance_fee` is optional and should come from `estimate` or `quotas`.
+
+`provision_customers` calls `POST /esims` per customer. Bulk issue uses one `client_reference` for the batch, so it is not used for a customer list. `wait=True` polls the job and assigns the ICCID when the payload contains one.
+
+`LineLifecycle` covers issue, status, suspend, resume, terminate, wallet, events, and `pool_topup`. Terminate is permanent. There is no DELETE and no per-line top-up. `read_audit` walks `GET /audit`.
+
+## Examples
+
+- FastAPI fulfilment: [`examples/fastapi-fulfilment/main.py`](../examples/fastapi-fulfilment/main.py).
+- Monthly billing export: [`examples/monthly-billing/export.py`](../examples/monthly-billing/export.py).
 
 ## Release
 
