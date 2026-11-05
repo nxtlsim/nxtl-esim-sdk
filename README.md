@@ -83,6 +83,16 @@ The OpenAPI document names every operation and fully schemas errors, eSIM object
 - There is no per-line top-up and no DELETE eSIM. `POST /topup` credits the partner pool from prepaid budget. Terminate is permanent.
 - Public destination region rows do not list member countries, so region search does not expand to ISO codes.
 
+## Related projects
+
+These are separate NXTL repositories. They are not published packages.
+
+- [nxtl-webhook-starter](https://github.com/nxtlsim/nxtl-webhook-starter) — verify `X-NXTL-Signature-V1` and forward webhook events.
+- [nxtl-balance-alerts](https://github.com/nxtlsim/nxtl-balance-alerts) — poll `GET /balance` and alert when the pool is low.
+- [awesome-esim](https://github.com/nxtlsim/awesome-esim) — list of eSIM tools. The NXTL entry is under Provider APIs and SDKs.
+
+Samples in this repo are under [Examples](#examples).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
