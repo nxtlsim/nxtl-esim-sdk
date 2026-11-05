@@ -1,0 +1,50 @@
+name: Release JavaScript SDK
+
+on:
+  push:
+    tags:
+      - "js-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: js/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - name: Align package version with the tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#js-v}"
+          export VERSION
+          node --input-type=module <<'JS'
+          import fs from "node:fs";
+          const version = process.env.VERSION;
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          pkg.version = version;
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          const source = "src/version.ts";
+          const text = fs.readFileSync(source, "utf8").replace(
+            /export const SDK_VERSION = ".*";/,
+            'export const SDK_VERSION = "' + version + '";',
+          );
+          fs.writeFileSync(source, text);
+          JS
+      - run: npm run build
+      - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

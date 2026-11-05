@@ -1,0 +1,62 @@
+{
+  "name": "@nxtlsim/esim-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the NXTL eSIM B2B API. Issue, resell and manage pay-as-you-go travel eSIMs.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nxtlsim/nxtl-esim-sdk.git",
+    "directory": "js"
+  },
+  "homepage": "https://nxtlsim.com",
+  "bugs": {
+    "url": "https://github.com/nxtlsim/nxtl-esim-sdk/issues"
+  },
+  "keywords": [
+    "nxtl",
+    "esim",
+    "pay-as-you-go",
+    "reseller",
+    "b2b"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run lint && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
