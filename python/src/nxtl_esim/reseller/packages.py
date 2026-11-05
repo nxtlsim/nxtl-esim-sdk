@@ -167,6 +167,41 @@ def sync_package_threshold(client: Any, package: Mapping[str, Any]) -> dict[str,
     return {"created": True}
 
 
+def refresh_allocations(allocations: Iterable[Mapping[str, Any]], packages: Iterable[Mapping[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
+    """Recompute exhausted and expired from the clock. No usage rows are required."""
+    moment = now or datetime.now(timezone.utc)
+    by_id = {item["id"]: item for item in packages}
+    refreshed = []
+    for allocation in allocations:
+        nxt = dict(allocation)
+        package = by_id.get(nxt.get("package_id"))
+        if package:
+            _refresh(nxt, package, moment)
+        refreshed.append(nxt)
+    return refreshed
+
+
+def line_needs_suspension(iccid: str, allocations: Iterable[Mapping[str, Any]], packages: Iterable[Mapping[str, Any]], now: datetime | None = None) -> bool:
+    """True when suspend is still due and no unexpired package with remaining bytes remains."""
+    moment = now or datetime.now(timezone.utc)
+    by_id = {item["id"]: item for item in packages}
+    mine = [item for item in allocations if item.get("iccid") == iccid]
+    for allocation in mine:
+        package = by_id.get(allocation.get("package_id"))
+        if not package:
+            continue
+        if _parse(str(allocation["expires_at"])) <= moment or allocation.get("status") == "expired":
+            continue
+        if float(allocation.get("consumed_bytes") or 0) < _cap(allocation, package):
+            return False
+    return any(
+        (package := by_id.get(allocation.get("package_id")))
+        and package.get("overage") == "suspend"
+        and allocation.get("status") in {"exhausted", "expired", "overage"}
+        for allocation in mine
+    )
+
+
 def suspend_overage_lines(client: Any, allocations: Iterable[Mapping[str, Any]], packages: Iterable[Mapping[str, Any]], manual_pause: set[str] | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
     by_id = {item["id"]: item for item in packages}
     current = now or datetime.now(timezone.utc)

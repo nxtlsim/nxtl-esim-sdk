@@ -8,7 +8,7 @@ import { WEBHOOK_EVENT_NAMES, type WebhookEnvelope } from "../types.js";
 import type { MarkupConfig } from "../pricing.js";
 import type { PricingFeed } from "../catalog.js";
 import type { FxTable } from "./fx.js";
-import { applyUsageToPackages, suspendOverageLines } from "./packages.js";
+import { applyUsageToPackages, lineNeedsSuspension, refreshAllocations } from "./packages.js";
 import type { CustomerDirectory } from "./customers.js";
 import { normalizeUsageRow, periodBounds, type UsagePeriod } from "./usage.js";
 import { postingForRow } from "./money.js";
@@ -109,6 +109,8 @@ export interface SyncOptions {
   suspendOverage?: boolean;
   /** Distinguishes cursor checkpoints. Defaults to `default`. Not shared across ICCIDs or date filters. */
   accountId?: string;
+  /** Clock used for package expiry. Defaults to the current time. */
+  now?: Date;
   onAlert?: AlertHandler;
 }
 
@@ -234,10 +236,11 @@ export async function syncReseller(directory: CustomerDirectory, options: SyncOp
       }
       if (cursor > after) checkpoints.push({ scope, afterId: cursor });
     }
+    const packages = await directory.store.listPackages();
+    const now = options.now ?? new Date();
     let allocations = await directory.store.listAllocations({ customerId: customer.id });
     if (volumeRows.length > 0 && !capabilityUnavailable) {
-      const packages = await directory.store.listPackages();
-      const consumption = applyUsageToPackages(volumeRows, allocations, packages, options.packageMode ?? "fifo");
+      const consumption = applyUsageToPackages(volumeRows, allocations, packages, options.packageMode ?? "fifo", now);
       allocations = consumption.allocations;
       for (const allocation of allocations) {
         if (allocation.status !== "overage" && allocation.status !== "exhausted") continue;
@@ -246,34 +249,57 @@ export async function syncReseller(directory: CustomerDirectory, options: SyncOp
         alerts.push(alert);
         await options.onAlert?.(alert);
       }
+    } else {
+      allocations = refreshAllocations(allocations, packages, now);
     }
     await directory.store.commitSync({
       wallet,
       applied,
-      allocations: volumeRows.length > 0 && !capabilityUnavailable ? allocations : [],
+      allocations,
       checkpoints,
       pending,
       clearPending,
     });
     if (options.suspendOverage !== false) {
-      const packages = await directory.store.listPackages();
-      const results = await suspendOverageLines(directory.client, allocations, packages, { manualPauseIccids: manualPause });
-      const failed: FailedAction[] = results.filter((item) => !item.ok).map((item) => ({
-        id: `suspend_${item.iccid}`,
-        iccid: item.iccid,
-        kind: "suspend",
-        error: item.error ?? "suspend failed",
-        at: new Date().toISOString(),
-      }));
-      const clearFailed = results.filter((item) => item.ok).map((item) => `suspend_${item.iccid}`);
+      const owned = new Set(lines.map((line) => line.iccid));
+      const due = [...owned].filter((iccid) => !manualPause.has(iccid) && lineNeedsSuspension(iccid, allocations, packages, now));
+      const failed: FailedAction[] = [];
+      const clearFailed: string[] = [];
+      for (const iccid of due) {
+        try {
+          await directory.client.suspendEsim(iccid);
+          clearFailed.push(`suspend_${iccid}`);
+        } catch (error) {
+          failed.push({
+            id: `suspend_${iccid}`,
+            iccid,
+            customerId: customer.id,
+            kind: "suspend",
+            error: error instanceof Error ? error.message : "suspend failed",
+            at: now.toISOString(),
+          });
+        }
+      }
       const prior = await directory.store.listFailedActions();
       for (const action of prior) {
-        if (manualPause.has(action.iccid) || clearFailed.includes(action.id)) continue;
+        if (action.customerId && action.customerId !== customer.id) continue;
+        if (!action.customerId && !owned.has(action.iccid)) continue;
+        const stillDue = owned.has(action.iccid) && !manualPause.has(action.iccid) && lineNeedsSuspension(action.iccid, allocations, packages, now);
+        if (!stillDue) {
+          clearFailed.push(action.id);
+          continue;
+        }
+        if (due.includes(action.iccid)) continue;
         try {
           await directory.client.suspendEsim(action.iccid);
           clearFailed.push(action.id);
         } catch (error) {
-          failed.push({ ...action, error: error instanceof Error ? error.message : action.error, at: new Date().toISOString() });
+          failed.push({
+            ...action,
+            customerId: customer.id,
+            error: error instanceof Error ? error.message : action.error,
+            at: now.toISOString(),
+          });
         }
       }
       if (failed.length > 0 || clearFailed.length > 0) {

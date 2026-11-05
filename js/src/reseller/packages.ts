@@ -136,6 +136,48 @@ export function applyUsageToPackages(
   return { allocations: next, consumedBytes, overageBytes, unmatchedBytes, unmeteredRows };
 }
 
+/** Recompute exhausted and expired from the clock. No usage rows are required. */
+export function refreshAllocations(
+  allocations: readonly PackageAllocation[],
+  packages: readonly SellablePackage[],
+  now = new Date(),
+): PackageAllocation[] {
+  const byId = new Map(packages.map((pkg) => [pkg.id, pkg]));
+  return allocations.map((allocation) => {
+    const next = { ...allocation };
+    const pkg = byId.get(allocation.packageId);
+    if (pkg) refreshStatus(next, pkg, now);
+    return next;
+  });
+}
+
+/**
+ * True when the line's suspend policy is still due and no unexpired package
+ * with remaining bytes is assigned to this ICCID.
+ */
+export function lineNeedsSuspension(
+  iccid: string,
+  allocations: readonly PackageAllocation[],
+  packages: readonly SellablePackage[],
+  now = new Date(),
+): boolean {
+  const byId = new Map(packages.map((pkg) => [pkg.id, pkg]));
+  const mine = allocations.filter((allocation) => allocation.iccid === iccid);
+  const eligible = mine.some((allocation) => {
+    const pkg = byId.get(allocation.packageId);
+    if (!pkg) return false;
+    if (new Date(allocation.expiresAt).getTime() <= now.getTime()) return false;
+    if (allocation.status === "expired") return false;
+    return allocation.consumedBytes < pkg.dataCapBytes + (allocation.bonusBytes ?? 0);
+  });
+  if (eligible) return false;
+  return mine.some((allocation) => {
+    const pkg = byId.get(allocation.packageId);
+    if (!pkg || pkg.overage !== "suspend") return false;
+    return allocation.status === "exhausted" || allocation.status === "expired" || allocation.status === "overage";
+  });
+}
+
 export function remainingAllowance(allocation: PackageAllocation, pkg: SellablePackage, now = new Date()): {
   bytesRemaining: number;
   daysRemaining: number;

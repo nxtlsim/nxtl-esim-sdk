@@ -78,6 +78,7 @@ CREATE TABLE nxtl_reseller_pending (
 CREATE TABLE nxtl_reseller_failed_actions (
   id TEXT PRIMARY KEY,
   iccid TEXT NOT NULL,
+  customer_id TEXT,
   kind TEXT NOT NULL,
   error TEXT NOT NULL,
   at TEXT NOT NULL
@@ -86,6 +87,7 @@ CREATE TABLE nxtl_reseller_failed_actions (
 
 CUSTOMER_STORE_MIGRATIONS = [
     "ALTER TABLE nxtl_reseller_lines ADD COLUMN manual_pause INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE nxtl_reseller_failed_actions ADD COLUMN customer_id TEXT",
 ]
 
 
@@ -578,6 +580,20 @@ def _apply_sql(query: Any, wallet: list[dict[str, Any]] | None, applied: list[di
         query(
             "INSERT INTO nxtl_reseller_pending (scope, ledger_id, iccid, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(scope, ledger_id) DO UPDATE SET created_at=excluded.created_at",
             [item["scope"], item["ledger_id"], item["iccid"], item.get("created_at")],
+        )
+    for allocation in extra.get("allocations") or []:
+        query(
+            "INSERT INTO nxtl_reseller_allocations (id, document_json) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET document_json=excluded.document_json",
+            [allocation["id"], json.dumps(allocation)],
+        )
+    for action_id in extra.get("clear_failed") or []:
+        query("DELETE FROM nxtl_reseller_failed_actions WHERE id = ?", [action_id])
+    for action in extra.get("failed_actions") or []:
+        query(
+            """INSERT INTO nxtl_reseller_failed_actions (id, iccid, customer_id, kind, error, at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET error=excluded.error, at=excluded.at, customer_id=excluded.customer_id""",
+            [action["id"], action["iccid"], action.get("customer_id"), action.get("kind") or "suspend", action.get("error") or "", action.get("at") or ""],
         )
 
 

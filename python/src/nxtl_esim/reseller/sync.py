@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .money import posting_for_row
-from .packages import apply_usage_to_packages, suspend_overage_lines
+from .packages import apply_usage_to_packages, line_needs_suspension, refresh_allocations
 from .usage import normalize_usage_row, period_bounds
 
 
@@ -95,14 +95,10 @@ async def _sync_async(directory: Any, cursor: Any, pages: Any, options: Mapping[
                 checkpoints.append({"scope": scope, "after_id": cursor_id})
             elif cursor_id > after:
                 checkpoints.append({"scope": scope, "after_id": cursor_id})
-        allocations = directory.store.list_allocations(customer_id=customer["id"])
-        if volume_rows and not unavailable:
-            packages = directory.store.list_packages()
-            consumption = apply_usage_to_packages(volume_rows, allocations, packages, options.get("package_mode") or "fifo")
-            allocations = consumption["allocations"]
-        directory.store.commit_sync(wallet, applied, allocations=allocations if volume_rows and not unavailable else [], checkpoints=checkpoints, pending=pending, clear_pending=clear_pending)
+        allocations, packages = _prepare_allocations(directory, customer["id"], volume_rows, unavailable, options)
+        directory.store.commit_sync(wallet, applied, allocations=allocations, checkpoints=checkpoints, pending=pending, clear_pending=clear_pending)
         if options.get("suspend_overage", True):
-            _suspend(directory, allocations, manual)
+            await _suspend_async(directory, customer["id"], lines, allocations, packages, manual, options)
         low = options.get("low_balance")
         if low and directory.wallet_balance(customer["id"], low["currency"]) <= float(low["threshold"]):
             alerts.append({"type": "low_balance", "customer_id": customer["id"], "balance": directory.wallet_balance(customer["id"], low["currency"]), "currency": low["currency"]})
@@ -143,14 +139,10 @@ def _finish(directory: Any, options: Mapping[str, Any], load_cursor: Any, load_p
             unavailable = unavailable or line_unavailable
             if cursor_id > after:
                 checkpoints.append({"scope": scope, "after_id": cursor_id})
-        allocations = directory.store.list_allocations(customer_id=customer["id"])
-        if volume_rows and not unavailable:
-            packages = directory.store.list_packages()
-            consumption = apply_usage_to_packages(volume_rows, allocations, packages, options.get("package_mode") or "fifo")
-            allocations = consumption["allocations"]
-        directory.store.commit_sync(wallet, applied, allocations=allocations if volume_rows and not unavailable else [], checkpoints=checkpoints, pending=pending, clear_pending=clear_pending)
+        allocations, packages = _prepare_allocations(directory, customer["id"], volume_rows, unavailable, options)
+        directory.store.commit_sync(wallet, applied, allocations=allocations, checkpoints=checkpoints, pending=pending, clear_pending=clear_pending)
         if options.get("suspend_overage", True):
-            _suspend(directory, allocations, manual)
+            _suspend(directory, customer["id"], lines, allocations, packages, manual, options)
         low = options.get("low_balance")
         if low:
             balance = directory.wallet_balance(customer["id"], low["currency"])
@@ -220,10 +212,87 @@ def _consume(customer: Mapping[str, Any], line: Mapping[str, Any], scope: str, a
     return blocked, cursor, unavailable
 
 
-def _suspend(directory: Any, allocations: list[dict[str, Any]], manual: set[str]) -> None:
+def _clock(options: Mapping[str, Any]) -> datetime:
+    now = options.get("now")
+    if isinstance(now, datetime):
+        return now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _prepare_allocations(directory: Any, customer_id: str, volume_rows: list[dict[str, Any]], unavailable: bool, options: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     packages = directory.store.list_packages()
-    results = suspend_overage_lines(directory.client, allocations, packages, manual)
-    failed = [{"id": f"suspend_{item['iccid']}", "iccid": item["iccid"], "kind": "suspend", "error": item.get("error") or "suspend failed", "at": datetime.now(timezone.utc).isoformat()} for item in results if not item["ok"]]
-    clear = [f"suspend_{item['iccid']}" for item in results if item["ok"]]
+    allocations = directory.store.list_allocations(customer_id=customer_id)
+    now = _clock(options)
+    if volume_rows and not unavailable:
+        allocations = apply_usage_to_packages(volume_rows, allocations, packages, options.get("package_mode") or "fifo", now)["allocations"]
+    else:
+        allocations = refresh_allocations(allocations, packages, now)
+    return allocations, packages
+
+
+def _suspend(directory: Any, customer_id: str, lines: list[Mapping[str, Any]], allocations: list[dict[str, Any]], packages: list[dict[str, Any]], manual: set[str], options: Mapping[str, Any]) -> None:
+    now = _clock(options)
+    owned = {line["iccid"] for line in lines}
+    due = [iccid for iccid in owned if iccid not in manual and line_needs_suspension(iccid, allocations, packages, now)]
+    failed: list[dict[str, Any]] = []
+    clear: list[str] = []
+    for iccid in due:
+        try:
+            directory.client.suspend_esim(iccid)
+            clear.append(f"suspend_{iccid}")
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"id": f"suspend_{iccid}", "iccid": iccid, "customer_id": customer_id, "kind": "suspend", "error": str(exc), "at": now.isoformat()})
+    for action in directory.store.list_failed_actions():
+        owner = action.get("customer_id")
+        if owner and owner != customer_id:
+            continue
+        if not owner and action.get("iccid") not in owned:
+            continue
+        iccid = str(action.get("iccid"))
+        still_due = iccid in owned and iccid not in manual and line_needs_suspension(iccid, allocations, packages, now)
+        if not still_due:
+            clear.append(str(action["id"]))
+            continue
+        if iccid in due:
+            continue
+        try:
+            directory.client.suspend_esim(iccid)
+            clear.append(str(action["id"]))
+        except Exception as exc:  # noqa: BLE001
+            failed.append({**action, "customer_id": customer_id, "error": str(exc), "at": now.isoformat()})
+    if failed or clear:
+        directory.store.commit_sync(failed_actions=failed, clear_failed=clear)
+
+
+async def _suspend_async(directory: Any, customer_id: str, lines: list[Mapping[str, Any]], allocations: list[dict[str, Any]], packages: list[dict[str, Any]], manual: set[str], options: Mapping[str, Any]) -> None:
+    now = _clock(options)
+    owned = {line["iccid"] for line in lines}
+    due = [iccid for iccid in owned if iccid not in manual and line_needs_suspension(iccid, allocations, packages, now)]
+    failed: list[dict[str, Any]] = []
+    clear: list[str] = []
+    for iccid in due:
+        try:
+            await directory.client.suspend_esim(iccid)
+            clear.append(f"suspend_{iccid}")
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"id": f"suspend_{iccid}", "iccid": iccid, "customer_id": customer_id, "kind": "suspend", "error": str(exc), "at": now.isoformat()})
+    for action in directory.store.list_failed_actions():
+        owner = action.get("customer_id")
+        if owner and owner != customer_id:
+            continue
+        if not owner and action.get("iccid") not in owned:
+            continue
+        iccid = str(action.get("iccid"))
+        still_due = iccid in owned and iccid not in manual and line_needs_suspension(iccid, allocations, packages, now)
+        if not still_due:
+            clear.append(str(action["id"]))
+            continue
+        if iccid in due:
+            continue
+        try:
+            await directory.client.suspend_esim(iccid)
+            clear.append(str(action["id"]))
+        except Exception as exc:  # noqa: BLE001
+            failed.append({**action, "customer_id": customer_id, "error": str(exc), "at": now.isoformat()})
     if failed or clear:
         directory.store.commit_sync(failed_actions=failed, clear_failed=clear)

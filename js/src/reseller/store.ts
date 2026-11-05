@@ -133,6 +133,8 @@ export interface PendingDetail {
 export interface FailedAction {
   id: string;
   iccid: string;
+  /** Customer the action was recorded for. Retries do not cross customers. */
+  customerId?: string;
   kind: "suspend";
   error: string;
   at: string;
@@ -638,6 +640,7 @@ CREATE TABLE nxtl_reseller_pending (
 CREATE TABLE nxtl_reseller_failed_actions (
   id TEXT PRIMARY KEY,
   iccid TEXT NOT NULL,
+  customer_id TEXT,
   kind TEXT NOT NULL,
   error TEXT NOT NULL,
   at TEXT NOT NULL
@@ -647,6 +650,7 @@ CREATE TABLE nxtl_reseller_failed_actions (
 /** Add manual_pause on stores created before that column existed. */
 export const CUSTOMER_STORE_MIGRATIONS = [
   "ALTER TABLE nxtl_reseller_lines ADD COLUMN manual_pause INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE nxtl_reseller_failed_actions ADD COLUMN customer_id TEXT",
 ];
 
 export type SqlQuery = (sql: string, params?: readonly unknown[]) => Promise<Array<Record<string, unknown>>>;
@@ -819,13 +823,17 @@ export class SqlCustomerStore implements CustomerStore {
 
   async listFailedActions(): Promise<FailedAction[]> {
     const rows = await this.query("SELECT * FROM nxtl_reseller_failed_actions", []);
-    return rows.map((row) => ({
-      id: String(row.id),
-      iccid: String(row.iccid),
-      kind: "suspend" as const,
-      error: String(row.error),
-      at: String(row.at),
-    }));
+    return rows.map((row) => {
+      const action: FailedAction = {
+        id: String(row.id),
+        iccid: String(row.iccid),
+        kind: "suspend",
+        error: String(row.error),
+        at: String(row.at),
+      };
+      if (row.customer_id) action.customerId = String(row.customer_id);
+      return action;
+    });
   }
 
   async commitSync(commit: SyncCommit): Promise<void> {
@@ -881,9 +889,9 @@ async function applySqlCommit(query: SqlQuery, commit: SyncCommit): Promise<void
   }
   for (const action of commit.failedActions ?? []) {
     await query(
-      `INSERT INTO nxtl_reseller_failed_actions (id, iccid, kind, error, at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET error=excluded.error, at=excluded.at`,
-      [action.id, action.iccid, action.kind, action.error, action.at],
+      `INSERT INTO nxtl_reseller_failed_actions (id, iccid, customer_id, kind, error, at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET error=excluded.error, at=excluded.at, customer_id=excluded.customer_id`,
+      [action.id, action.iccid, action.customerId ?? null, action.kind, action.error, action.at],
     );
   }
 }
